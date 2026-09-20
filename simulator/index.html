@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Badge Market / two-badge lab</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101514;color:#e9f1e7;font:15px system-ui,sans-serif}main{max-width:1000px;margin:0 auto;padding:52px 24px}small{color:#c7f45c;letter-spacing:2px}h1{font-size:44px;letter-spacing:-2px;margin:12px 0}p{color:#9bacaa;line-height:1.6;max-width:690px}.badges{display:flex;gap:32px;flex-wrap:wrap;margin:32px 0}.badge{background:#242b29;border:1px solid #435249;padding:22px;border-radius:24px;width:370px;box-shadow:0 14px 30px #0005}.name{color:#a5b3ac;font-size:11px;letter-spacing:2px;margin-bottom:16px}.screen{position:relative;width:320px;height:240px;background:#101918;overflow:hidden;border-radius:3px}.widget{position:absolute;white-space:pre;overflow:hidden;line-height:1.12;font-family:Arial,sans-serif}.controls{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:18px}button{font:inherit;border-radius:9px;border:1px solid #59675d;padding:10px 4px;background:#303a33;color:#edf4e8;cursor:pointer}button:hover{background:#526042}button:active{transform:translateY(1px)}button.primary{background:#c7f45c;color:#101918;border-color:#c7f45c}.note{font-size:12px;color:#91a093}footer{border-top:1px solid #354139;padding-top:18px}.error{color:#ff657a}
+</style><main><small>HACK THE NORTH / BADGE LAB</small><h1>Fake money. Real betrayal.</h1>
+<p>Two virtual badges running the actual Lua app. On Trader 1 choose <b>Host nearby market</b>. On Trader 2 choose <b>Join nearby market</b>. This tests game logic; hardware rendering and radio timing still require real badges.</p>
+<div class="badges" id="badges"></div>
+<footer><button id="loss">Drop next 3 packets</button> <span class="note">Use the hold button for the three-second rug confirmation.</span><p class="note" id="status">SDK mock · 320 × 240 · no internet or real money</p></footer></main>
+<script>
+const root=document.querySelector('#badges');let busy=false,queue=[];
+for(let n=1;n<=2;n++){
+ const card=document.createElement('section');card.className='badge';card.innerHTML=`<div class="name">TRADER 0${n} / ESP32-C3 SIMULATION</div><div class="screen" id="screen${n}"></div><div class="controls"></div>`;
+ for(const key of ['UP','DOWN','LEFT','RIGHT','A','B','START','AUX1']){const b=document.createElement('button');b.textContent=key;b.ariaLabel=`Trader ${n} ${key}`;if(key==='A')b.className='primary';b.onclick=()=>send({op:'key',device:n,key});card.querySelector('.controls').append(b)}
+ const hold=document.createElement('button');hold.textContent='Hold START';hold.ariaLabel=`Trader ${n} Hold START`;hold.style.gridColumn='span 4';hold.onpointerdown=()=>send({op:'hold',device:n,down:true});hold.onpointerup=hold.onpointerleave=()=>send({op:'hold',device:n,down:false});card.querySelector('.controls').append(hold);root.append(card)
+}
+const hex=n=>'#'+n.toString(16).padStart(6,'0');
+function paint(data){data.forEach((widgets,i)=>{const screen=document.querySelector('#screen'+(i+1));screen.replaceChildren();for(const w of widgets){const el=document.createElement('div');el.className='widget';el.textContent=w.text;Object.assign(el.style,{left:w.x+'px',top:w.y+'px',width:w.w+'px',height:w.h+'px',fontSize:w.font+'px',color:hex(w.color),background:w.bg<0?'transparent':hex(w.bg)});screen.append(el)}})}
+async function send(event){if(busy){if(event.op!=='tick')queue.push(event);return}busy=true;try{const r=await fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(event)});paint(await r.json())}catch(e){document.querySelector('#status').textContent=e.message;document.querySelector('#status').className='error'}finally{busy=false;if(queue.length)send(queue.shift())}}
+document.querySelector('#loss').onclick=()=>send({op:'loss'});fetch('/state').then(r=>r.json()).then(paint);setInterval(()=>send({op:'tick'}),100);
+</script></html>

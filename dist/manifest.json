@@ -1,0 +1,16 @@
+{
+  "slug": "badge_market",
+  "bytes": 43936,
+  "files": 9,
+  "sha256": {
+    "codec.lua": "cd322f5a2ee88ff226e346429297c5b68f0d78949f62b6e4de435a7e83f45186",
+    "copy.lua": "b235629c1cd48ae52f0bca7b808441f13405eda3315836ca6f3d4da34c8dfcd2",
+    "duel.lua": "70e5437ae4538d3d92c93946da0866b35bd16e72e33af553d3dd138594b919a1",
+    "games.lua": "0019401e6eb11b5b987691b10aeecb8ce02d074521cdc8b325cdbe39016c1033",
+    "main.lua": "d4c7faff3fcf179603d313030802ed3aa24527024f116d863886022496159334",
+    "manifest.cfg": "feff2f8fd712a6ef4450c8638221146a1f59bfb0b86f1354b33dec8b45d98876",
+    "market.lua": "f22c2c4c391f0c5d7786e8dc4ba19f2c32e5a9c77932c1e64814f9ffdb3bfaf7",
+    "session.lua": "a15f271150f89ce2104aabd12473e3ef31c082c8d478e2d0760b73a32697dda3",
+    "ui.lua": "8bff1b458e14b94c58ef3b30ad39ef710bcae41617814964fe507c68e13a5144"
+  }
+}

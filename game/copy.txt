@@ -1,0 +1,208 @@
+GOOSE
+ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+Waiting for game ticket
+BADGE MARKET
+HTN 26
+FAKE MONEY.
+Real friends. Questionable decisions.
+UP/DOWN choose    A enter
+Solo market
+Host nearby market
+Join nearby market
+ SOL
+Epoch 
+ / all currency is fictional
+A market    B games    START hub
+UP     Portfolio
+DOWN   Launch a meme
+LEFT   Nearby / duel
+RIGHT  Profile + save
+THE EXCHANGE
+DIAMOND HANDS
+ coins / hold a full epoch for fees
+UP/DOWN coin    A view    B hub
+No memes yet. DOWN at hub to launch.
+  
+ / own 
+ RUG
+Loading coin...
+COIN
+SYNC
+Loading...
+Requesting one compact record
+B market
+RUGGED
+LIVE
+Owned 
+ / holders 
+ / meme 
+A buy    B sell    START hub
+Quantity: 
+   LEFT/RIGHT
+Supply 
+ / treasury 
+DOWN creator controls
+Hold across epochs. Earn fees.
+UP back to market
+LAUNCH A MEME
+2 SOL
+Edit 5-letter ticker / character 
+A launch    B cancel    START hub
+LEFT/RIGHT choose character
+UP/DOWN change letter
+One live coin per creator
+Price starts at 0.100 SOL
+THE GRIND
+PLAY
+SKILL PAYS.
+Earn up to 6 SOL per market epoch.
+UP/DOWN choose    A play    B hub
+Reaction Trader / earn SOL
+Tilt Vault / practice
+Badge Duel / nearby
+NEARBY MARKETS
+NEARBY PLAYERS
+BLE
+MEET. TRADE.
+Host keeps this app open. Range varies.
+UP/DOWN choose    A join    B back
+UP/DOWN choose    A duel    B back
+Market #
+Trader #
+Open this market on another badge.
+YOUR LORE
+REP 
+ / 100
+Creator reputation / rugs 
+A save    LEFT dim LEDs    B hub
+Title: TRUST ME BRO
+Title: FLIGHT RISK
+ / epoch 
+LED level 
+ / AUX toggles
+Lua 
+ / 
+Heap 
+ / tick 
+CREATOR OFFICE
+RISK
+Loading
+Normal withdrawals use creator fees only
+UP/DOWN choose    A confirm    B back
+Withdraw 10%
+Withdraw 25%
+Withdraw 50%
+DO SOMETHING TERRIBLE
+EXIT LIQUIDITY
+DANGER
+YOUR REP: COOKED
+This drains the fee treasury. Buys stop.
+Hold START 3s to rug    B cancel
+Holders keep their tokens and SOL.
+Their next community reward? Gone.
+The goose is watching you.
+RUG ALERT
+REKT
+ RAN AWAY
+CREATOR RAN AWAY
+Community treasury has left the chat.
+A return    HOME saves + exits
+HOLD THIS L.
+Sells still redeem the curve reserve.
+Badge Market / 
+ / fake SOL only
+ peak=
+ free=
+ widgets=
+ tick_max=
+ drops=
+WAIT...
+BUY!
+SELL!
+HOLD!
+MARKET CLOSED
+GET READY
+REACTION TRADER
+SOLO
+Accuracy first. Speed second.
+A BUY    B SELL    UP HOLD
+Round 
+ / 8
+Correct 
+A claim reward / return
+Early press = wrong answer
+TILT VAULT
+PRACTICE
+VAULT OPEN
+FIND THE EXIT
+Tilt or use D-pad. No SOL farming.
+B back    HOME saves + exits
+@ 
+$ 
+# 
+. 
+HONK! PRESS A
+WAIT FOR HONK
+DUEL INVITATION
+A PERFECT TIE
+YOU OUT-HONKED THEM
+YOU GOT HONKED
+PEER DISCONNECTED
+WAITING FOR PEER
+BADGE DUEL
+VERSUS
+Bragging rights. No radio timing advantage.
+A accept / react    B cancel
+You: false start
+You: 
+ ms
+Them: false start
+Them: 
+First correct reaction wins.
+Choose a market
+Not saved
+Confirmed
+Market full
+Sync required
+Not enough SOL
+Portfolio full
+Not enough tokens
+Coin unavailable
+Launch cooldown
+One live coin each
+Symbol taken / invalid
+Wait 20 seconds
+Game proof rejected
+Epoch reward cap
+Request rejected
+Radio unavailable - solo works
+Saved market has no room
+Restored
+Unsaved
+25 SOL. Zero consequences.
+Joining...
+Pending - START retries
+Submitting...
+Join or host a market first
+Retrying same request
+Saved
+SAVE FAILED
+No reply - START retries
+MARKET
+OK
+Market full
+Unknown player
+Retry sync
+Not enough SOL
+Bad amount
+No holding slot
+Not enough tokens
+Coin unavailable
+Creator only
+Launch cooldown
+One live coin each
+Bad symbol
+Wait for cooldown
+Invalid game proof
+Reward budget empty
+Sequence exhausted
