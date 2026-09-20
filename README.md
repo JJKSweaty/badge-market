@@ -1,5 +1,22 @@
 # Badge Market
 
+**Playing with a friend? Start with the [Market guide](MARKET-README.md)** for
+hosting, joining, creating coins, trading, saving, and leaving a market.
+
+**Native ESP-IDF firmware is now in [`firmware/`](firmware/README.md).** Open that
+folder in VS Code, then use the **Badge: build** task. It contains the C++ game,
+hardware drivers, ESP-NOW multiplayer, saves, and backup-before-flash workflow.
+The native version replaces the stock firmware and does not run Lua.
+
+```sh
+bash tools/firmware.sh build
+bash tools/test_native.sh
+# When ready to replace the firmware (backs up the badge first):
+bash tools/firmware.sh flash /dev/cu.usbmodem1101
+```
+
+The remainder of this README documents the retained **stock-firmware Lua version**.
+
 A badge-native meme-coin game for the **stock 2026 Hacker Badge firmware**.
 Fake SOL, nearby markets, reaction duels, diamond hands, and creator betrayal.
 No phone, server, wallet, cryptocurrency or internet connection is required.
@@ -83,6 +100,23 @@ before switching off. Selling after a rug remains funded because curve reserves
 are separate from withdrawable fee treasuries.
 
 ## Development and verification
+
+### ESP-IDF toolchain (optional, for replacement firmware development)
+
+The official Custom Flash guide pins ESP-IDF 5.5.3. Install the ESP32-C3
+toolchain inside this checkout (downloads are excluded from Git):
+
+```sh
+bash tools/setup_esp_idf.sh
+bash tools/idf.sh --version
+```
+
+`tools/idf.sh` activates that installation and forwards arguments to `idf.py`
+in your current directory. The standalone C++ firmware project is in `firmware/`.
+The online IDE's **Push** uploads Lua app files; it does not flash the native
+firmware. See [`firmware/README.md`](firmware/README.md) for the native workflow.
+
+### App tests and simulator
 
 ```sh
 make test

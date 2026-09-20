@@ -1,6 +1,12 @@
 LUA_DIR := third_party/lua-5.4.8/src
 LUA := $(LUA_DIR)/lua
-.PHONY: test lua package clean test32
+.PHONY: test lua package clean test32 native test-native package-native
+native:
+	bash tools/firmware.sh build
+test-native:
+	bash tools/test_native.sh
+package-native: native
+	python3 tools/package_firmware.py
 lua:
 	$(MAKE) -C $(LUA_DIR) generic MYCFLAGS='-DLUA_USE_POSIX' -j4
 build/quota: tests/quota.c $(LUA_DIR)/liblua.a

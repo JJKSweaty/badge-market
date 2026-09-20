@@ -1,0 +1,7 @@
+{
+  "idf.port": "/dev/cu.usbmodem1101",
+  "idf.buildPath": "${workspaceFolder}/build",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "files.associations": {"*.hpp": "cpp"},
+  "files.exclude": {"build": true}
+}

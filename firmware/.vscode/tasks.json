@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "Badge: build", "type": "process", "command": "bash", "args": ["${workspaceFolder}/../tools/firmware.sh", "build"], "group": {"kind": "build", "isDefault": true}, "problemMatcher": "$gcc"},
+    {"label": "Badge: test native logic", "type": "process", "command": "bash", "args": ["${workspaceFolder}/../tools/test_native.sh"], "problemMatcher": "$gcc"},
+    {"label": "Badge: backup and flash", "type": "process", "command": "bash", "args": ["${workspaceFolder}/../tools/firmware.sh", "flash", "${input:badgePort}"], "problemMatcher": []},
+    {"label": "Badge: monitor", "type": "process", "command": "bash", "args": ["${workspaceFolder}/../tools/firmware.sh", "monitor", "${input:badgePort}"], "problemMatcher": []}
+  ],
+  "inputs": [{"id": "badgePort", "type": "promptString", "description": "Badge USB serial port", "default": "/dev/cu.usbmodem1101"}]
+}
