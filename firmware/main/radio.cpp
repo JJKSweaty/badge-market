@@ -7,12 +7,13 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "nvs_flash.h"
 #include <atomic>
 namespace radio {
 static QueueHandle_t queue;
 static std::atomic<bool> busy{false};
 static std::atomic<uint32_t> drops{0};
-static bool wifiReady, wifiStarted, nowReady, enabled;
+static bool nvsReady, wifiReady, wifiStarted, nowReady, enabled;
 static void received(const esp_now_recv_info_t *info, const uint8_t *data,
                      int len) {
   if (!info || len < 24 || len > int(bm::PacketMax))
@@ -64,6 +65,15 @@ esp_err_t enable() {
     return err;
   auto setup = []() -> esp_err_t {
     esp_err_t e;
+    if (!nvsReady) {
+      // bm_store is the game save partition, not the default NVS partition
+      // used by the PHY. Without this init the SDK repeats full RF calibration
+      // on every cold start and cannot retain its calibration results.
+      // Preserve existing NVS contents; a failure is a retryable menu error.
+      if ((e = nvs_flash_init()) != ESP_OK)
+        return e;
+      nvsReady = true;
+    }
     if (!wifiReady) {
       if ((e = esp_netif_init()) != ESP_OK)
         return e;
@@ -81,9 +91,10 @@ esp_err_t enable() {
       return e;
     wifiStarted = true;
     // PHY startup is capped separately at 10 dBm in sdkconfig.defaults.
-    // 20 quarter-dBm = 5 dBm: nearby-badge range, lower TX current peaks.
+    // 8 quarter-dBm = 2 dBm, the SDK's minimum runtime setting. The PHY
+    // startup cap is distinct and still applies before this API can run.
     // Keep continuous reception: unsynchronized ESP-NOW sleeping loses peers.
-    if ((e = esp_wifi_set_max_tx_power(20)) != ESP_OK ||
+    if ((e = esp_wifi_set_max_tx_power(8)) != ESP_OK ||
         (e = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK ||
         (e = esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE)) != ESP_OK ||
         (e = esp_now_init()) != ESP_OK)

@@ -1,4 +1,5 @@
 #include "board.hpp"
+#include "bomb.hpp"
 #include "driver/usb_serial_jtag.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -7,21 +8,21 @@
 #include "feedback.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "games.hpp"
+#include "play.hpp"
 #include "radio.hpp"
 #include "storage.hpp"
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <new>
 using namespace bm;
 namespace {
 Session session;
-Reaction reaction;
-Duel duel;
+
 Feedback feedback;
 uint32_t ledCompleted = 0;
-Duel::Phase ledDuelPhase = Duel::Idle;
+
 enum class Scene {
   Boot,
   Scan,
@@ -34,10 +35,11 @@ enum class Scene {
   Creator,
   Rug,
   Games,
-  Reaction,
-  Maze,
-  Nearby,
-  Duel,
+  Word,
+  Run,
+  Bomb,
+  Result,
+  Pause,
   Profile,
   Leave
 };
@@ -45,20 +47,54 @@ Scene scene = Scene::Boot;
 Scene leaveReturn = Scene::Hub, coinReturn = Scene::Market,
       createReturn = Scene::Hub;
 int leaveSelected = 0, coinSelected = 0, hubSelected = 0;
-int selected = 0, coinId = 1, amount = 1, mazeX = 1, mazeY = 1;
+int selected = 0, coinId = 1, amount = 1;
 char symbol[6] = "GOOSE";
 const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 uint16_t held = 0, injected = 0;
-uint64_t pulseEnd = 0, rugAt = 0, paintAt = 0, saveAt = 0, ledAt = 0,
-         mazeAt = 0;
+uint64_t pulseEnd = 0, rugAt = 0, paintAt = 0, saveAt = 0, ledAt = 0;
+uint64_t transitionAt = 0;
 bool dirty = true, ledEnabled = true, dim = true, wantTicket = false,
-     claimSent = false, mazeWon = false, saveOk = true;
+     claimSent = false, saveOk = true;
 const char *saveStatus = "NO CHECKPOINT YET";
 unsigned rugsSeen = 0;
+int rugAlertCoin = -1;
+uint64_t rugAlertUntil = 0;
+uint32_t renderMax = 0, renderCount = 0, renderHistogram[64]{};
+uint64_t renderTotal = 0;
+uint32_t runRenderCount = 0, runRenderMax = 0, runRenderHistogram[64]{};
+uint32_t run_percentile(unsigned percent) {
+  uint32_t total = 0, target = (runRenderCount * percent + 99) / 100;
+  for (unsigned i = 0; i < 64; i++) {
+    total += runRenderHistogram[i];
+    if (total >= target)
+      return i;
+  }
+  return 63;
+}
+uint32_t percentile(unsigned percent) {
+  uint32_t total = 0, target = (renderCount * percent + 99) / 100;
+  for (unsigned i = 0; i < 64; i++) {
+    total += renderHistogram[i];
+    if (total >= target)
+      return i;
+  }
+  return 63;
+}
 bool rugArmed = false;
 bool editingLetter = false;
 bool leaveEditing = false;
 char savedLetter = 0;
+bool buying = true;
+uint32_t quoteValue{};
+void release_game();
+void prepare_game_exit();
+void pause_game(uint64_t);
+void resume_game(uint64_t);
+bool live_game();
+bool allow_rug_alert() {
+  return scene == Scene::Hub || scene == Scene::Coin ||
+         scene == Scene::Market || scene == Scene::Creator;
+}
 void move_selection(int key, int count) {
   if (count < 1) {
     selected = 0;
@@ -70,6 +106,8 @@ void move_selection(int key, int count) {
     selected = (selected + count - 1) % count;
 }
 void go(Scene s, int selection = 0) {
+  if (s == Scene::Boot || s == Scene::Hub || s == Scene::Games)
+    release_game();
   if (s == Scene::Boot) {
     session.cancel_join();
     if (radio::disable() != ESP_OK)
@@ -79,6 +117,7 @@ void go(Scene s, int selection = 0) {
   feedback.trigger(Glow::Navigate, board::ms());
   editingLetter = false;
   scene = s;
+  transitionAt = board::ms();
   selected = selection;
   rugAt = 0;
   rugArmed = false;
@@ -105,6 +144,7 @@ void checkpoint() {
 void ask_leave() {
   if (scene == Scene::Leave)
     return;
+  pause_game(board::ms());
   leaveReturn = scene;
   leaveSelected = selected;
   leaveEditing = editingLetter;
@@ -113,8 +153,10 @@ void ask_leave() {
 void resume_market() {
   go(leaveReturn, leaveSelected);
   editingLetter = leaveEditing;
+  resume_game(board::ms());
 }
 void leave_market() {
+  prepare_game_exit();
   if (session.authority()) {
     checkpoint();
     if (!saveOk) {
@@ -126,18 +168,19 @@ void leave_market() {
     session.status = "RADIO STOP FAILED - TRY AGAIN";
     return;
   }
-  // Reset pending requests, discovery and minigames together. No old market
+  release_game();
+  // Reset pending requests, discovery and games together. No old market
   // packets/reward callbacks may mutate the next session.
   auto mac = session.self;
   session.init(mac, radio::send, [](void *) { return esp_random(); }, nullptr);
-  duel = Duel{};
-  duel.init(session);
-  reaction = Reaction{};
+
   wantTicket = claimSent = false;
   feedback = Feedback{};
   ledCompleted = 0;
-  ledDuelPhase = Duel::Idle;
+
   rugsSeen = 0;
+  rugAlertCoin = -1;
+  rugAlertUntil = 0;
   hubSelected = 0;
   go(Scene::Boot);
 }
@@ -150,12 +193,6 @@ void action(Op op, unsigned coin = 0, unsigned count = 0) {
     std::memcpy(r.symbol, symbol, 6);
   session.act(r, board::ms());
   dirty = true;
-}
-int nearby(int nth) {
-  for (unsigned i = 0; i < session.world.players; i++)
-    if (int(i) != session.player && nth-- == 0)
-      return i;
-  return -1;
 }
 void start(bool hosting, uint64_t now) {
   if ((hosting ? radio::enable() : radio::disable()) != ESP_OK) {
@@ -212,12 +249,19 @@ const char *reset_problem() {
     return nullptr;
   }
 }
+#include "game_ui.inc"
 void button(int key, uint64_t now) {
   if (key == board::Up || key == board::Down || key == board::A ||
       key == board::B)
     feedback.trigger(Glow::Navigate, now);
   if (key == board::Aux) {
     ledEnabled = !ledEnabled;
+    dirty = true;
+    return;
+  }
+  if (rugAlertUntil > now && key != board::Home && key != board::Aux) {
+    rugAlertUntil = 0;
+    rugAlertCoin = -1;
     dirty = true;
     return;
   }
@@ -238,16 +282,18 @@ void button(int key, uint64_t now) {
     dirty = true;
     return;
   }
+  if (game_button(key, now)) {
+    dirty = true;
+    return;
+  }
   if (key == board::Start) {
-    if (scene == Scene::Duel)
-      duel.press(false, now);
     if (session.player >= 0)
       go(Scene::Hub, hubSelected);
     else
       go(Scene::Boot);
     return;
   }
-  if (key == board::B && scene != Scene::Reaction && scene != Scene::Duel) {
+  if (key == board::B) {
     if (scene == Scene::Create && editingLetter) {
       symbol[selected] = savedLetter;
       editingLetter = false;
@@ -258,18 +304,18 @@ void button(int key, uint64_t now) {
       go(Scene::Boot);
     else if (scene == Scene::Hub)
       ask_leave();
-    else if (scene == Scene::Coin)
-      go(coinReturn, coinSelected);
-    else if (scene == Scene::Quantity)
-      go(Scene::Coin, 2);
+    else if (scene == Scene::Coin) {
+      buying = false;
+      go(Scene::Quantity);
+    } else if (scene == Scene::Quantity)
+      go(Scene::Coin, buying ? 0 : 1);
     else if (scene == Scene::Creator)
       go(Scene::Coin, 3);
     else if (scene == Scene::Rug)
       go(Scene::Creator, 3);
     else if (scene == Scene::Create)
       go(createReturn, createReturn == Scene::Hub ? hubSelected : 0);
-    else if (scene == Scene::Maze)
-      go(Scene::Games, 1);
+
     else if (scene != Scene::Boot && scene != Scene::Hub)
       go(Scene::Hub, hubSelected);
     return;
@@ -299,13 +345,13 @@ void button(int key, uint64_t now) {
     if (key == board::B)
       go(Scene::Boot);
   } else if (scene == Scene::Hub) {
-    move_selection(key, 6);
+    move_selection(key, 5);
     if (key == board::A) {
       hubSelected = selected;
       createReturn = Scene::Hub;
-      static const Scene targets[] = {Scene::Market,    Scene::Games,
+      static const Scene targets[] = {Scene::Market, Scene::Games,
                                       Scene::Portfolio, Scene::Create,
-                                      Scene::Nearby,    Scene::Profile};
+                                      Scene::Profile};
       go(targets[selected]);
     }
   } else if (scene == Scene::Market) {
@@ -327,28 +373,31 @@ void button(int key, uint64_t now) {
     }
   } else if (scene == Scene::Coin) {
     bool owner = session.world.c[coinId - 1].creator == session.player;
-    move_selection(key, owner ? 5 : 4);
+    move_selection(key, owner ? 4 : 3);
     if (key == board::A) {
-      if (selected == 0)
-        action(Op::Buy, coinId, amount);
-      else if (selected == 1)
-        action(Op::Sell, coinId, amount);
-      else if (selected == 2)
+      if (selected < 2) {
+        buying = selected == 0;
         go(Scene::Quantity);
-      else if (selected == 3 && owner)
+      } else if (selected == 2 && owner)
         go(Scene::Creator);
-      else {
+      else
         go(coinReturn, coinSelected);
-      }
     }
   } else if (scene == Scene::Quantity) {
     if (key == board::Up)
       amount = std::min(100, amount + 1);
     if (key == board::Down)
       amount = std::max(1, amount - 1);
-    if (key == board::A) {
-      go(Scene::Coin);
-      selected = 2;
+    if (key == board::A && quoteValue && !session.pending) {
+      Request r{};
+      r.op = buying ? Op::Buy : Op::Sell;
+      r.coin = coinId;
+      r.amount = amount;
+      Writer w{r.proof, sizeof r.proof};
+      w.u32(quoteValue);
+      session.act(r, now);
+      if (session.pending || session.last.code == Error::Ok)
+        go(Scene::Coin, buying ? 0 : 1);
     }
   } else if (scene == Scene::Create) {
     if (editingLetter) {
@@ -399,53 +448,6 @@ void button(int key, uint64_t now) {
   } else if (scene == Scene::Rug) {
     if (key == board::B)
       go(Scene::Coin);
-  } else if (scene == Scene::Games) {
-    if (key == board::Down || key == board::Up)
-      selected ^= 1;
-    if (key == board::A) {
-      if (selected == 0) {
-        Request q{};
-        q.op = Op::Ticket;
-        wantTicket = session.act(q, now);
-      } else {
-        mazeX = mazeY = 1;
-        mazeWon = false;
-        go(Scene::Maze);
-      }
-    }
-  } else if (scene == Scene::Reaction) {
-    if (reaction.phase == Reaction::Done && key == board::B) {
-      go(Scene::Games);
-      return;
-    }
-    auto oldPhase = reaction.phase;
-    auto oldScore = reaction.score;
-    if (key == board::A || key == board::B || key == board::Up)
-      reaction.press(key == board::A ? 0 : key == board::B ? 1 : 2, now);
-    if ((oldPhase == Reaction::Go || oldPhase == Reaction::Wait) &&
-        reaction.phase == Reaction::Pause)
-      feedback.trigger(reaction.score > oldScore ? Glow::Buy : Glow::Error,
-                       now);
-  } else if (scene == Scene::Nearby) {
-    int count = std::max(0, int(session.world.players) - 1);
-    if (key == board::Down && count)
-      selected = (selected + 1) % count;
-    if (key == board::Up && count)
-      selected = (selected + count - 1) % count;
-    if (key == board::A && count && session.mode != Mode::Solo) {
-      int who = nearby(selected);
-      if (who >= 0) {
-        duel.challenge(session.world.p[who].mac, esp_random(), now);
-        go(Scene::Duel);
-      }
-    }
-  } else if (scene == Scene::Duel) {
-    if (key == board::A)
-      duel.press(true, now);
-    if (key == board::B) {
-      duel.press(false, now);
-      go(Scene::Nearby);
-    }
   } else if (scene == Scene::Profile) {
     move_selection(key, 4);
     if (key == board::A) {
@@ -462,6 +464,8 @@ void button(int key, uint64_t now) {
   dirty = true;
 }
 void observe_feedback(uint64_t now) {
+  if (now < feedback.until || now < transitionAt + 180)
+    dirty = true;
   if (session.completed != ledCompleted) {
     ledCompleted = session.completed;
     if (session.last.code != Error::Ok)
@@ -485,39 +489,18 @@ void observe_feedback(uint64_t now) {
         break;
       }
   }
-  if (duel.phase != ledDuelPhase) {
-    ledDuelPhase = duel.phase;
-    if (duel.phase == Duel::Done)
-      feedback.trigger(duel.mine <= duel.theirs ? Glow::Win : Glow::Error, now);
-    if (duel.phase == Duel::Cancelled)
-      feedback.trigger(Glow::Error, now);
-  }
 }
 Light gameplay_light(uint64_t now) {
   Light f;
   // Immediate gameplay cues override decorative and transaction effects.
   if (scene == Scene::Rug)
     f = {uint8_t(now % 900 < 450 ? 12 : 2), 0, 0, -1};
-  else if (scene == Scene::Reaction && reaction.phase == Reaction::Go)
-    f = {uint8_t(reaction.key == 1 ? 12 : 0),
-         uint8_t(reaction.key == 0 ? 12 : 0),
-         uint8_t(reaction.key == 2 ? 12 : 0), -1};
-  else if (scene == Scene::Duel && duel.phase == Duel::Go)
-    f = {12, 9, 1, -1};
   else if (now < feedback.until)
     f = feedback.sample(now);
-  else if (scene == Scene::Reaction && reaction.phase == Reaction::Wait)
-    f = {3, 2, 0, -1};
-  else if (scene == Scene::Duel && duel.phase == Duel::Wait)
-    f = {0, 0, 2, -1};
-  else if (scene == Scene::Duel &&
-           (duel.phase == Duel::Invite || duel.phase == Duel::Offer ||
-            duel.phase == Duel::Accept))
-    f = {4, 0, 6, int(now / 220 % 6)};
   else if (session.pending || scene == Scene::Scan)
     f = {0, 3, 7, int(now / 180 % 6)};
-  else if (scene == Scene::Maze)
-    f = {0, 4, 5, int((mazeX + mazeY - 2) % 6)};
+  else if (scene == Scene::Run && activeGame == Game::Run && game.run.shield)
+    f = {0, 6, 8, -1};
   else
     f = {1, 4, 2, int(now / 400 % 6)};
   return brightness(f, ledEnabled, dim);
@@ -532,11 +515,44 @@ void update_leds(uint64_t now) {
   board::leds(f.r, f.g, f.b, f.active);
 }
 void draw() {
-  board::Screen f{};
+  static board::Screen f;
+  std::memset(static_cast<void *>(&f), 0, sizeof f);
+  f.translate = board::ms() < transitionAt + 180
+                    ? int(transitionAt + 180 - board::ms()) / 10
+                    : 0;
+  f.background = board::Paper;
+  f.accent = board::Cyan;
+  f.selected = -1;
   str(f.title, "BADGE MARKET");
-  str(f.subtitle, "TRADE COINS / PLAY MINIGAMES");
+  str(f.subtitle, "TRADE COINS / PLAY GAMES");
   str(f.footer, "UP/DOWN MOVE   A SELECT   B BACK");
   str(f.status, session.status);
+  if (rugAlertCoin >= 0 && rugAlertUntil > board::ms() && !live_game() &&
+      scene != Scene::Leave) {
+    auto &c = session.world.c[rugAlertCoin];
+    f.custom = true;
+    f.box(0, 0, 320, 36, board::Red);
+    f.text(14, 10, "RUGGED", board::Paper, 2);
+    f.text(18, 57, c.symbol, board::Ink, 3);
+    char name[16];
+    player_name(name, c.creator);
+    ui_text(f, 18, 93, board::Ink, 1, "%s RAN OFF WITH", name);
+    ui_text(f, 18, 118, board::Gold, 3, "%lu.%03lu SOL",
+            (unsigned long)c.rugLoot / 1000, (unsigned long)c.rugLoot % 1000);
+    ui_text(f, 18, 163, board::Muted, 1, "YOUR BAG: %u %s",
+            session.player >= 0
+                ? owned(session.world.p[session.player], rugAlertCoin + 1)
+                : 0,
+            c.symbol);
+    f.text(18, 191, "HOLD THIS L", board::Red, 2);
+    f.text(18, 225, "HOLDERS CAN STILL SELL", board::Muted);
+    board::render(f);
+    return;
+  }
+  if (game_draw(f, board::ms())) {
+    board::render(f);
+    return;
+  }
   auto &w = session.world;
   auto *player = session.player >= 0 ? &w.p[session.player] : nullptr;
   switch (scene) {
@@ -583,11 +599,10 @@ void draw() {
              "WALLET", (unsigned long)player->balance / 1000,
              (unsigned long)player->balance % 1000, player->rep);
     str(f.rows[0], "MARKET");
-    str(f.rows[1], "MINIGAMES");
+    str(f.rows[1], "GAMES");
     str(f.rows[2], "PORTFOLIO");
     str(f.rows[3], "LAUNCH A COIN");
-    str(f.rows[4], "BADGE DUELS");
-    str(f.rows[5], "PROFILE / SETTINGS");
+    str(f.rows[4], "PROFILE / SETTINGS");
     f.selected = selected;
     str(f.footer, "UP/DOWN MOVE   A OPEN   B LEAVE");
     if (session.mode == Mode::Host &&
@@ -630,42 +645,51 @@ void draw() {
   case Scene::Coin: {
     auto &c = w.c[coinId - 1];
     str(f.title, c.symbol);
-    format(f.subtitle, sizeof f.subtitle, "SUPPLY %u / OWN %u / MEME %u",
-           c.supply, player ? owned(*player, coinId) : 0, c.meme);
-    str(f.rows[0], "BUY - UNAVAILABLE");
-    str(f.rows[1], "SELL - UNAVAILABLE");
-    auto price = cost(c.supply, amount);
-    if (price >= 0 && !c.rugged) {
-      price += (price + 49) / 50;
-      format(f.rows[0], sizeof f.rows[0], "BUY  %lld.%03lld SOL",
-             (long long)price / 1000, (long long)price % 1000);
-    }
-    auto sell = cost(c.supply - amount, amount);
-    if (sell >= 0 && player && owned(*player, coinId) >= amount) {
-      sell -= c.rugged ? 0 : (sell + 49) / 50;
-      format(f.rows[1], sizeof f.rows[1], "SELL %lld.%03lld SOL",
-             (long long)sell / 1000, (long long)sell % 1000);
-    }
-    format(f.rows[2], sizeof f.rows[2], "QUANTITY: %d", amount);
+    auto price = 100 + 5 * c.supply;
+    format(f.subtitle, sizeof f.subtitle, "%u.%03u SOL / YOU OWN %u%s",
+           price / 1000, price % 1000, player ? owned(*player, coinId) : 0,
+           c.rugged ? " / RUGGED" : "");
+    str(f.rows[0], c.rugged ? "BUY CLOSED - RUGGED" : "BUY TOKENS");
+    str(f.rows[1], "SELL TOKENS");
     bool owner = c.creator == session.player;
     if (owner)
-      str(f.rows[3], "CREATOR CONTROLS");
-    str(f.rows[owner ? 4 : 3], coinReturn == Scene::Portfolio
-                                   ? "BACK TO PORTFOLIO"
-                                   : "BACK TO MARKET");
+      str(f.rows[2], "CREATOR CONTROLS");
+    str(f.rows[owner ? 3 : 2], "BACK");
     f.selected = selected;
-    if (c.rugged)
-      f.accent = board::Red;
+    str(f.footer, selected == 0 ? "A BUY   B SELL   UP/DOWN OPTIONS"
+                                : "A SELECT   B SELL   START DASHBOARD");
+    if (session.last.code == Error::Ok &&
+        (session.completedOp == Op::Buy || session.completedOp == Op::Sell) &&
+        board::ms() < feedback.until) {
+      format(f.rows[4], sizeof f.rows[4], "%s",
+             session.completedOp == Op::Buy ? "PURCHASED" : "SOLD");
+      format(f.rows[5], sizeof f.rows[5], "%lu.%03lu SOL",
+             (unsigned long)session.last.value / 1000,
+             (unsigned long)session.last.value % 1000);
+    }
     break;
   }
-  case Scene::Quantity:
-    str(f.title, "TRADE QUANTITY");
-    str(f.subtitle, "SET HOW MANY TOKENS TO BUY OR SELL");
-    format(f.rows[1], sizeof f.rows[1], "%d TOKENS", amount);
-    str(f.rows[3], "UP MORE / DOWN FEWER");
-    str(f.rows[4], "A DONE");
-    str(f.footer, "UP/DOWN ADJUST   A DONE   B BACK");
+  case Scene::Quantity: {
+    auto &c = w.c[coinId - 1];
+    format(f.title, sizeof f.title, "%s %s", buying ? "BUY" : "SELL", c.symbol);
+    str(f.subtitle, buying ? "COST INCLUDES FEE" : "RECEIVE AFTER FEE");
+    auto gross = cost(buying ? c.supply : c.supply - amount, amount);
+    quoteValue = 0;
+    if (gross >= 0 && !(buying && c.rugged)) {
+      auto fee = c.rugged ? 0 : (gross + 49) / 50;
+      quoteValue = buying ? gross + fee : gross - fee;
+    }
+    format(f.rows[0], sizeof f.rows[0], "AMOUNT: %d", amount);
+    format(f.rows[2], sizeof f.rows[2], "%s %lu.%03lu SOL",
+           buying ? "COST" : "RECEIVE", (unsigned long)quoteValue / 1000,
+           (unsigned long)quoteValue % 1000);
+    if (!quoteValue)
+      str(f.rows[2], "UNAVAILABLE");
+    str(f.rows[4], "A CONFIRM / B CANCEL");
+    str(f.footer, "UP/DOWN QUANTITY   A CONFIRM   B CANCEL");
+    f.accent = buying ? board::Green : board::Red;
     break;
+  }
   case Scene::Create:
     str(f.title, "LAUNCH A COIN");
     format(f.subtitle, sizeof f.subtitle, "SYMBOL %s / COST 2 SOL", symbol);
@@ -723,92 +747,11 @@ void draw() {
     str(f.footer, "RELEASE TO CANCEL   B BACK");
     break;
   case Scene::Games:
-    str(f.title, "MINIGAMES");
-    str(f.rows[0], "REACTION TRADER");
-    str(f.rows[1], "TILT VAULT");
-    str(f.rows[3], "REACTION: UP TO 2 SOL");
-    str(f.rows[4], "6 SOL PER EPOCH CAP");
-    str(f.rows[5], "MAZE: PRACTICE ONLY");
-    f.selected = selected;
-    break;
-  case Scene::Reaction: {
-    str(f.footer, "A BUY   B SELL   UP HOLD   START HUB");
-    str(f.title, "REACTION TRADER");
-    str(f.subtitle, "A BUY / B SELL / UP HOLD - WAIT FOR CUE");
-    const char *cues[] = {"BUY!", "SELL!", "HOLD!"};
-    str(f.rows[0], reaction.phase == Reaction::Wait   ? "WAIT..."
-                   : reaction.phase == Reaction::Go   ? cues[reaction.key]
-                   : reaction.phase == Reaction::Done ? "ROUND COMPLETE"
-                                                      : "GET READY");
-    format(f.rows[2], sizeof f.rows[2], "ROUND %u / 8",
-           std::min(8u, reaction.round));
-    format(f.rows[3], sizeof f.rows[3], "CORRECT %u / 8", reaction.score);
-    if (reaction.phase == Reaction::Done)
-      str(f.rows[5],
-          session.pending ? "VERIFYING REWARD..." : "B BACK TO MINIGAMES");
-    if (reaction.phase == Reaction::Done)
-      str(f.footer, "B MINIGAMES   START HUB   HOME LEAVE");
-    if (reaction.phase == Reaction::Go)
-      f.accent = reaction.key == 0   ? board::Green
-                 : reaction.key == 1 ? board::Red
-                                     : board::Blue;
-    break;
-  }
-  case Scene::Maze: {
-    str(f.footer, "TILT OR D-PAD MOVE   B BACK");
-    str(f.title, "TILT VAULT");
-    str(f.subtitle, mazeWon ? "VAULT OPEN! / PRACTICE, NO SOL"
-                            : "TILT OR D-PAD / MOVE @ TO $");
-    static const int walls[] = {127, 65, 93, 81, 87, 65, 127};
-    for (int y = 1; y <= 5; y++) {
-      char row[16]{};
-      for (int x = 1; x <= 5; x++) {
-        row[(x - 1) * 2] = x == mazeX && y == mazeY ? '@'
-                           : x == 5 && y == 5       ? '$'
-                           : walls[y] & (1 << x)    ? '#'
-                                                    : '.';
-        row[(x - 1) * 2 + 1] = ' ';
-      }
-      str(f.rows[y - 1], row);
-    }
-    break;
-  }
-  case Scene::Nearby:
-    str(f.title, "BADGE DUELS");
-    str(f.subtitle, "LOCAL REACTION TIMES / BRAGGING RIGHTS");
-    for (int row = 0; row < 6; row++) {
-      int p = nearby(selected / 6 * 6 + row);
-      if (p >= 0)
-        format(f.rows[row], sizeof f.rows[row], "TRADER %02X%02X  REP %u",
-               w.p[p].mac.b[4], w.p[p].mac.b[5], w.p[p].rep);
-    }
-    if (w.players < 2)
-      str(f.rows[1], "NO OTHER TRADERS YET");
-    else
-      f.selected = selected % 6;
-    str(f.footer, "UP/DOWN CHOOSE   A DUEL   B BACK");
-    break;
-  case Scene::Duel:
-    str(f.footer, "A ACCEPT / REACT   B CANCEL");
-    str(f.title, "BADGE DUEL");
-    str(f.subtitle, "A REACT / B CANCEL / NO SOL AT STAKE");
-    str(f.rows[0], duel.phase == Duel::Invite ? "A ACCEPT CHALLENGE"
-                   : duel.phase == Duel::Go   ? "HONK! PRESS A!"
-                   : duel.phase == Duel::Wait ? "WAIT FOR HONK..."
-                   : duel.phase == Duel::Done
-                       ? (duel.mine == duel.theirs  ? "TIE!"
-                          : duel.mine < duel.theirs ? "YOU WIN!"
-                                                    : "THEY WIN!")
-                   : duel.phase == Duel::Cancelled ? "DUEL TIMED OUT"
-                                                   : "WAITING FOR PEER...");
-    if (duel.haveMine)
-      format(f.rows[2], sizeof f.rows[2], "YOU  %s%u",
-             duel.mine == 65535 ? "FOUL " : "MS ",
-             duel.mine == 65535 ? 0 : duel.mine);
-    if (duel.haveTheirs)
-      format(f.rows[3], sizeof f.rows[3], "THEM %s%u",
-             duel.theirs == 65535 ? "FOUL " : "MS ",
-             duel.theirs == 65535 ? 0 : duel.theirs);
+  case Scene::Word:
+  case Scene::Run:
+  case Scene::Bomb:
+  case Scene::Pause:
+  case Scene::Result:
     break;
   case Scene::Profile:
     str(f.title, "PROFILE / SETTINGS");
@@ -851,9 +794,28 @@ void console(uint64_t now) {
                (unsigned long)radio::dropped(), unsigned(radio::active()),
                radio::tx_power(), int(esp_reset_reason()), unsigned(scene),
                selected, session.status);
-      else if (!std::strcmp(line, "save"))
-        checkpoint();
-      else {
+      else if (!std::strcmp(line, "metrics")) {
+        printf("METRICS frames=%lu avg_ms=%lu p50_ms=%lu p95_ms=%lu max_ms=%lu "
+               "stack_free=%u game_arena=%u game=%u score=%lu wallet=%lu\n",
+               (unsigned long)renderCount,
+               (unsigned long)(renderCount ? renderTotal / renderCount : 0),
+               (unsigned long)percentile(50), (unsigned long)percentile(95),
+               (unsigned long)renderMax,
+               unsigned(uxTaskGetStackHighWaterMark(nullptr)),
+               unsigned(sizeof game), unsigned(activeGame),
+               (unsigned long)(activeGame == Game::Run ? game.run.score : 0),
+               (unsigned long)(session.player >= 0
+                                   ? session.world.p[session.player].balance
+                                   : 0));
+        printf("RUN_METRICS frames=%lu p50_ms=%lu p95_ms=%lu max_ms=%lu\n",
+               (unsigned long)runRenderCount, (unsigned long)run_percentile(50),
+               (unsigned long)run_percentile(95), (unsigned long)runRenderMax);
+      } else if (!std::strcmp(line, "save")) {
+        if (!live_game())
+          checkpoint();
+        else
+          printf("SAVE DEFERRED UNTIL GAME PAUSED/COMPLETE\n");
+      } else {
         const char *names[] = {"A",     "B",  "HOME", "DOWN", "LEFT",
                                "RIGHT", "UP", "AUX",  "START"};
         char verb[8]{}, key[12]{};
@@ -887,12 +849,12 @@ extern "C" void app_main() {
   bm::Mac mac;
   ESP_ERROR_CHECK(radio::init(mac));
   session.init(mac, radio::send, [](void *) { return esp_random(); }, nullptr);
-  duel.init(session);
+
   usb_serial_jtag_driver_config_t usb{};
   usb.rx_buffer_size = 256;
   usb.tx_buffer_size = 512;
   ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb));
-  printf("\nBadge Market native 0.2.4 / ESP-NOW channel 6\nType help for "
+  printf("\nBadge Market native 0.3.1 / ESP-NOW channel 6\nType help for "
          "console commands.\nbm> ");
   while (true) {
     uint64_t now = board::ms();
@@ -911,88 +873,58 @@ extern "C" void app_main() {
     for (int i = 0; i < 8 && radio::receive(packet); i++)
       session.receive(packet.from, packet.rssi, packet.data, packet.size, now);
     session.tick(now);
-    duel.tick(now);
     if (scene == Scene::Scan && session.player >= 0)
       go(Scene::Hub);
-    if (wantTicket && !session.pending && scene != Scene::Leave) {
-      wantTicket = false;
-      if (scene == Scene::Games && session.last.code == Error::Ok &&
-          session.last.ticket) {
-        reaction.start(session.last.ticket, now);
-        claimSent = false;
-        go(Scene::Reaction);
-      }
-    }
-    if (scene == Scene::Reaction) {
-      auto previousPhase = reaction.phase;
-      dirty |= reaction.tick(now);
-      if (previousPhase == Reaction::Go && reaction.phase == Reaction::Pause)
-        feedback.trigger(Glow::Error, now);
-      if (reaction.phase == Reaction::Done && !claimSent) {
-        Request r{};
-        r.op = Op::Claim;
-        std::memcpy(r.proof, reaction.proof, 16);
-        claimSent = session.act(r, now);
-      }
-    }
-    if (duel.phase == Duel::Invite && scene != Scene::Duel &&
-        scene != Scene::Leave)
-      go(Scene::Duel);
+    game_tick(now);
     tick_rug(now);
-    if (scene == Scene::Maze && !mazeWon && now >= mazeAt) {
-      mazeAt = now + 130;
-      int ax = 0, ay = 0;
-      board::accel(ax, ay);
-      int dx = ax > 180    ? 1
-               : ax < -180 ? -1
-                           : 0,
-          dy = ay > 180    ? 1
-               : ay < -180 ? -1
-                           : 0;
-      if (held & (1 << board::Left))
-        dx = -1;
-      if (held & (1 << board::Right))
-        dx = 1;
-      if (held & (1 << board::Up))
-        dy = -1;
-      if (held & (1 << board::Down))
-        dy = 1;
-      static const int walls[] = {127, 65, 93, 81, 87, 65, 127};
-      int x = mazeX + dx, y = mazeY + dy;
-      if (x >= 1 && x <= 5 && !(walls[mazeY] & (1 << x)))
-        mazeX = x;
-      if (y >= 1 && y <= 5 && !(walls[y] & (1 << mazeX)))
-        mazeY = y;
-      mazeWon = mazeX == 5 && mazeY == 5;
-      if (mazeWon)
-        feedback.trigger(Glow::Win, now);
-      dirty |= dx || dy;
-    }
-    if (session.changed || duel.changed) {
+    if (session.changed) {
       dirty = true;
-      session.changed = duel.changed = false;
+      session.changed = false;
     }
     unsigned rugged = 0;
     for (unsigned i = 0; i < session.world.coins; i++)
       if (session.world.c[i].rugged)
         rugged |= 1u << i;
     if (rugged & ~rugsSeen) {
+      for (unsigned i = 0; i < session.world.coins; i++)
+        if ((rugged & ~rugsSeen) & (1u << i))
+          rugAlertCoin = i;
+      if (allow_rug_alert())
+        rugAlertUntil = now + 1000;
       feedback.trigger(Glow::Rug, now);
       session.status = "RUG ALERT! HOLDERS CAN STILL SELL";
       dirty = true;
     }
     rugsSeen = rugged;
-    if (session.authority() && now >= saveAt) {
+    if (session.authority() && now >= saveAt && !live_game()) {
       checkpoint();
       saveAt = now + 30000;
     }
+    if (rugAlertCoin >= 0 && allow_rug_alert() && !rugAlertUntil)
+      rugAlertUntil = now + 1000;
+    if (rugAlertUntil && now >= rugAlertUntil) {
+      rugAlertCoin = -1;
+      rugAlertUntil = 0;
+      dirty = true;
+    }
     if (dirty && now >= paintAt) {
+      auto began = board::ms();
       draw();
+      auto elapsed = uint32_t(board::ms() - began);
+      renderMax = std::max(renderMax, elapsed);
+      renderTotal += elapsed;
+      ++renderCount;
+      ++renderHistogram[std::min<uint32_t>(63u, elapsed)];
+      if (scene == Scene::Run && began >= transitionAt + 180) {
+        ++runRenderCount;
+        runRenderMax = std::max(runRenderMax, elapsed);
+        ++runRenderHistogram[std::min<uint32_t>(63u, elapsed)];
+      }
       dirty = false;
-      paintAt = board::ms() + 80;
+      paintAt = began + 33;
     }
     observe_feedback(now);
     update_leds(board::ms());
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(live_game() ? 1 : 10));
   }
 }

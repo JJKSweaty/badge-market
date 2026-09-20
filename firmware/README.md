@@ -3,6 +3,10 @@
 For a step-by-step two-badge walkthrough, read the
 [Market player guide](../MARKET-README.md).
 
+**v0.3.0 includes MEMEWORD, RUG RUN, and RUG BOMB.** See the
+[implementation/design contract](../docs/architecture.md) and
+[verification record](VERIFICATION.md) for tests and remaining physical gates.
+
 Standalone C++17 game for the 2026 Hacker Badge, built with **ESP-IDF 5.5.3**.
 It implements the hardware drivers and ESP-NOW radio itself. No Lua interpreter,
 stock badge API, external components, Wi-Fi access point, phone, or internet is
@@ -76,60 +80,41 @@ download-mode procedure if needed. No `erase_flash` is necessary.
 
 ## Play
 
-Boot: Up/Down and A choose Solo, Host, or Join. Host stays active while clients
-trade. Join discovers nearby native hosts; match the code displayed on the
-host's dashboard. Home, or B at the dashboard, opens a leave prompt. Confirm to
-save (Host/Solo), disconnect, and choose another mode without restarting. Solo
-and Host have separate checkpoints.
+See the [player guide](../MARKET-README.md) for controls, the three games,
+reward limits, and two-badge hosting/joining instructions. v0.3.0 replaces
+Reaction Trader, Tilt Vault, and Badge Duel. All participating badges need this
+native release; its version-2 wire protocol cannot join older native or Lua apps.
 
-| Screen | Controls |
-| --- | --- |
-| All menus | Up/Down moves highlight, A selects, B returns to previous screen |
-| Hub | Choose Market, Minigames, Portfolio, Launch a coin, Duels, or Profile |
-| Market | Up/Down select; A opens coin |
-| Coin | Highlight Buy, Sell, Quantity, Creator controls, or Back; A selects |
-| Quantity | Up adds one, Down subtracts one, A done |
-| Create | Select a letter with A, Up/Down edits, A done, B cancels edit; select Launch when ready |
-| Creator | 10/25/50% fee withdrawal; rug requires holding A for 3 seconds |
-| Reaction | Wait for cue, then A BUY / B SELL / Up HOLD; 8 rounds |
-| Tilt Vault | Tilt or D-pad moves @ to $; practice, no SOL reward |
-| Duel | Select trader; A challenge/accept/react, B cancel; no SOL stakes |
-| Profile | Select Save, LEDs, Brightness, or Back with Up/Down and A |
-| Global | Home opens leave prompt, Start hub/back, Aux toggles LEDs |
-| Leave prompt | Up/Down selects Keep playing or Leave; A confirms, B cancels |
+- Menus: Up/Down selects, A activates, B returns.
+- Coin detail: default A Buy, B Sell; quantity screen A confirms, B cancels.
+- MEMEWORD: Left/Right cursor, Up/Down letters (accelerating hold), A submits,
+  B clears. Start pauses.
+- RUG RUN: Left/Right lanes, A jump; Start pauses. Three hearts, 40-second limit.
+- RUG BOMB: host creates; guests join; everyone marks Ready with A. Holder uses
+  A to select a target, target presses the indicated key. Start does not stop
+  the multiplayer timer.
+- Home opens the market leave prompt. Solo/Host close only after saving.
+- Aux toggles LEDs; dim is default. No required information depends on LEDs.
 
-The rug warning requires releasing the entry A press, then holding A for three
-seconds. Releasing cancels the countdown. B cancels; Start returns to the hub.
-LEDs add feedback without changing the controls:
+The navy/cyan UI uses primitive cards, word tiles, tiny sprites, bounded particles,
+price movement and receipt feedback. The renderer tracks changed commands and hashes eight-row stripes and
+transmits only changed stripes using two 5 KiB DMA buffers, without a framebuffer. Only one
+native game arena is live. Flash writes wait for gameplay safe points.
 
-| LED effect | Meaning |
-| --- | --- |
-| Gentle green chase | Idle / active market |
-| Brief cyan tick | Menu action |
-| Green / blue | Confirmed buy / sell |
-| Purple chase | Coin launched |
-| Gold chase | Reward or withdrawal confirmed, maze complete, or duel win/tie |
-| Red | Rejected action or missed reaction |
-| Slow red pulse | Rug alert or rug confirmation screen |
-| Blue chase | Finding a host or waiting for a trade response |
-| Reaction: green / red / blue | BUY / SELL / HOLD, matching the screen |
-| Duel: dim blue, then gold | Wait, then HONK / react |
-| Teal | Save confirmation; maze lights track movement |
+The save reader migrates v0.2.4 wallets/coins/holdings. It preserves the existing
+partition layout; historical positions with unknown cost basis show that fact
+instead of fabricated gains. Use a full backup before downgrading: v0.2.4 cannot
+read the new snapshot schema.
 
-Reaction and duel cues override decorative animations. Repeated packets do not
-replay trade confirmations; only committed results trigger them. Effects expire,
-use no heap allocation or blocking delays, and stay at modest brightness. Profile
-settings and Aux disable all LED output; Dim reduces every effect and is the
-default on startup. Nothing
-requires seeing the LEDs. The accelerometer can fail without stopping the game;
-the D-pad remains available.
+USB console also accepts `metrics` for renderer timing, stack headroom, active
+game, score, and wallet. The existing `status` and button-injection commands remain.
 
 ## Battery power
 
-Version 0.2.3 keeps Wi-Fi off at the first menu and in Solo. Host and Join start
+The lower-power settings introduced in v0.2.3 keep Wi-Fi off at the first menu and in Solo. Host and Join start
 ESP-NOW on demand; backing out of discovery stops it. Startup PHY power is capped
 at 10 dBm (the SDK's minimum configuration value), then normal transmit power is
-capped at 5 dBm. Reception remains continuous for reliable nearby discovery.
+capped at **2 dBm in v0.3.1**. Reception remains continuous for nearby discovery.
 This reduces radio transmit peaks; it does not establish a measured battery
 lifetime. Range may be shorter than the previous maximum-power build.
 
@@ -137,22 +122,32 @@ The reported battery reboot displayed `LAST RESET: POWER DROPPED`, confirming a
 brownout. Brownout protection remains enabled. If that message recurs with this
 build, try fresh matched AA cells and check the battery contacts. A supply that
 still sags needs a battery/power-path check; firmware cannot maintain voltage.
-The console reports `radio=0 tx_qdbm=-1` while off and `radio=1 tx_qdbm=20` while
+The console reports `radio=0 tx_qdbm=-1` while off and `radio=1 tx_qdbm=8` while
 active. A radio setup error stays on the menu with a retry message.
+
+v0.3.1 initializes the default NVS partition before Wi-Fi so the PHY can reuse
+its saved calibration. Previously only the separate game-save partition was
+initialized, and hardware logs showed a full-calibration fallback. Existing NVS
+data is preserved. An idle host also stops rebroadcasting an unchanged full
+snapshot; discovery beacons and requested resynchronization remain active.
+These are power-demand mitigations, not a guarantee against weak batteries or
+poor contacts. Use USB power for the recorded demo until a battery-only test
+has passed. Both v0.3.0 and v0.3.1 share the version-2 game protocol.
 
 The economy preserves the Lua version's rules: 25 starting fake SOL, 2 SOL coin
 creation, linear bonding curve, 2% trade fees, creator/community fee pools,
 delayed holder rewards every 120 seconds, one active coin per creator, and rug
 reputation penalties. Reserves cannot be withdrawn; exits remain funded after
 a rug. Limits: 12 players, 16 lifetime coins, 4 holdings/player, 10,000 supply.
-Reaction rewards cap at 2 SOL/game and 6 SOL/epoch, with a 20-second cooldown.
+Game rewards use one-use tickets, validated word/run proofs, host-committed Bomb
+outcomes, and per-game/shared epoch limits. See the player guide for amounts.
 
 ## Architecture and verification limits
 
 - `core/`: portable economy, validated binary snapshots, transaction sequencing,
-  ESP-NOW application protocol, reaction proofs, and duels. Fixed-size records;
+  ESP-NOW application protocol, game proofs, and RUG BOMB authority. Fixed-size records;
   no game-state heap allocation. The host alone mutates the canonical market.
-- `main/board.cpp`: ST7789 via SPI/DMA, 10 KiB stripe buffer, 5x7 font,
+- `main/board.cpp`: ST7789 via SPI/DMA, two 5 KiB stripe buffers, 5x7 font,
   HC165/Start debounce, SC7A20 I2C with timeouts, WS2812 RMT. NFC is unused.
 - `main/radio.cpp`: station-mode ESP-NOW, one broadcast peer, 250-byte maximum,
   bounded 16-packet receive queue. Callbacks only copy data. Sends wait for the
@@ -162,17 +157,18 @@ Reaction rewards cap at 2 SOL/game and 6 SOL/epoch, with a 20-second cooldown.
   same sequence and payload; snapshots acknowledge their committed result.
   Dropped ACKs cannot duplicate trades. A missing host leaves a trade pending.
 - Save storage: dedicated 64 KiB NVS partition, two validated snapshots per mode;
-  write the older slot, commit, then read back. Checkpoint every 30 seconds when
-  dirty, on confirmed leave, and Profile Save now. Power cuts may roll back
+  write the older slot, commit, then read back. Checkpoint when due at safe
+  gameplay boundaries, on confirmed leave, and Profile Save now. Power cuts may roll back
   since the last save. A save failure blocks leaving the host/solo session.
-- Broadcast radio is unencrypted; MACs and reaction reports are not authenticated.
+- Broadcast radio is unencrypted; MACs and game input reports are not authenticated.
   This is a friendly game, not an adversarial financial system. There is no host
   migration, offline trading, stock-BLE interoperability, or automatic rollback
   recovery for already-connected clients. Restart clients after restoring a host.
 
 Host tests exercise 30,000 random trades with conservation checks, corrupted
-snapshots, duplicate requests, reaction tickets, and two peers under packet loss,
-duplication, a host outage, and duel handshakes. AddressSanitizer and
+snapshots, legacy migration, duplicate rewards, 2,000 deterministic runner paths,
+400 incremental-render comparisons, controller scene cycles, and 2–6 Bomb peers
+under packet loss/duplication, plus two-peer market outage/recovery. AddressSanitizer and
 UndefinedBehaviorSanitizer are enabled. A successful ESP-IDF build checks the
 actual ESP32-C3 ABI and drivers; it is not evidence of physical LCD orientation,
 button wiring, radio range, power draw, or runtime heap. Those require badge

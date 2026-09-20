@@ -30,6 +30,11 @@ public:
   Send send{};
   Entropy entropy{};
   void *context{};
+  using GameReceive = void (*)(void *, Mac, uint8_t, uint32_t, const uint8_t *,
+                               size_t, uint64_t);
+  GameReceive gameReceive{};
+  void *gameContext{};
+  bool send_game(Mac, uint8_t, uint32_t, const uint8_t *, size_t);
   Social social{};
   void *socialContext{};
   void init(Mac, Send, Entropy, void *);

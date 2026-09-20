@@ -1,5 +1,7 @@
 # Badge Market
 
+Recording a submission? Use the [three-minute demo shot list](DEMO-PLAN.md).
+
 **Playing with a friend? Start with the [Market guide](MARKET-README.md)** for
 hosting, joining, creating coins, trading, saving, and leaving a market.
 
@@ -7,6 +9,10 @@ hosting, joining, creating coins, trading, saving, and leaving a market.
 folder in VS Code, then use the **Badge: build** task. It contains the C++ game,
 hardware drivers, ESP-NOW multiplayer, saves, and backup-before-flash workflow.
 The native version replaces the stock firmware and does not run Lua.
+
+Native **v0.3.0** includes MEMEWORD, RUG RUN, RUG BOMB, and shared visual/reward
+improvements. See the [design contract](docs/architecture.md) and
+[native verification record](firmware/VERIFICATION.md).
 
 ```sh
 bash tools/firmware.sh build
@@ -144,5 +150,6 @@ must not be presented as actual ESP32 free heap. The manifest's 96 KiB limit is
 a ceiling, not a reservation or proof that enough system RAM is available.
 
 See [`docs/stock-runtime.md`](docs/stock-runtime.md) for the C/Lua boundary and
-[`docs/protocol.md`](docs/protocol.md) for wire/state formats. The earlier custom
-firmware proposal is retained in `docs/architecture.md` as a superseded option.
+[`docs/protocol.md`](docs/protocol.md) for the retained Lua wire/state formats.
+The current native implementation plan is in
+[`docs/architecture.md`](docs/architecture.md).

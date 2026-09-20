@@ -4,7 +4,7 @@
 #include <cctype>
 #include <cstring>
 namespace board::display {
-constexpr int StripeH = 16;
+constexpr int StripeH = 8;
 // Original compact 5x7 uppercase glyphs, columns stored in flash.
 static const uint8_t font[][5] = {{0x7e, 0x11, 0x11, 0x11, 0x7e},
                                   {0x7f, 0x49, 0x49, 0x49, 0x36},
@@ -79,10 +79,63 @@ static uint8_t glyph(char ch, int col) {
     return 0;
   }
 }
+// Cache command fingerprints and vertical bounds, not a second
+// scene/framebuffer. Repaint both the old and new extents of every
+// changed/removed primitive.
+struct Damage {
+  uint32_t hashes[128]{};
+  uint8_t tops[128]{}, bottoms[128]{};
+  unsigned count{};
+  uint16_t background{};
+  int translate{};
+  bool initialized{}, custom{};
+  uint32_t update(const Screen &f) {
+    uint32_t mask = (!initialized || !f.custom || !custom ||
+                     f.background != background || f.translate != translate)
+                        ? 0x3fffffffu
+                        : 0;
+    auto mark = [&](int top, int bottom) {
+      top = std::clamp(top, 0, 240);
+      bottom = std::clamp(bottom, 0, 240);
+      if (bottom > top)
+        for (int band = top / StripeH; band <= (bottom - 1) / StripeH; band++)
+          mask |= 1u << band;
+    };
+    for (unsigned i = 0; i < std::max(count, f.count); i++) {
+      uint32_t hash = 0;
+      int top = 0, bottom = 0;
+      if (i < f.count) {
+        const auto &c = f.commands[i];
+        const auto *bytes = reinterpret_cast<const uint8_t *>(&c);
+        hash = 2166136261u;
+        for (unsigned j = 0; j < sizeof c; j++)
+          hash = (hash ^ bytes[j]) * 16777619u;
+        top = std::clamp(int(c.y), 0, 240);
+        bottom =
+            std::clamp(int(c.y) + (c.type == 2 ? 7 * c.scale : c.h), 0, 240);
+      }
+      if (hash != hashes[i]) {
+        mark(tops[i], bottoms[i]);
+        mark(top, bottom);
+      }
+      hashes[i] = hash;
+      tops[i] = top;
+      bottoms[i] = bottom;
+    }
+    count = f.count;
+    background = f.background;
+    translate = f.translate;
+    custom = f.custom;
+    initialized = true;
+    return mask;
+  }
+};
 struct Painter {
   uint16_t *stripe;
+  int shift = 0;
   static uint16_t swap(uint16_t c) { return (c << 8) | (c >> 8); }
   void rect(int sy, int x, int y, int w, int h, uint16_t c) {
+    x += shift;
     for (int py = std::max(y, sy); py < std::min(y + h, sy + StripeH); py++)
       for (int px = std::max(0, x); px < std::min(320, x + w); px++)
         stripe[(py - sy) * 320 + px] = swap(c);
@@ -100,23 +153,41 @@ struct Painter {
     }
   }
   void paint(const Screen &f, int sy) {
-    std::fill_n(stripe, 320 * 16, swap(Paper));
+    shift = f.translate;
+    std::fill_n(stripe, 320 * StripeH, swap(f.background));
+    if (f.custom) {
+      for (unsigned i = 0; i < f.count; i++) {
+        const auto &c = f.commands[i];
+        if (c.type == 2)
+          text(sy, c.x, c.y, c.text, c.scale, c.color);
+        else if (!c.type)
+          rect(sy, c.x, c.y, c.w, c.h, c.color);
+        else {
+          rect(sy, c.x, c.y, c.w, 1, c.color);
+          rect(sy, c.x, c.y + c.h - 1, c.w, 1, c.color);
+          rect(sy, c.x, c.y, 1, c.h, c.color);
+          rect(sy, c.x + c.w - 1, c.y, 1, c.h, c.color);
+        }
+      }
+      return;
+    }
     text(sy, 14, 12, f.title, 2, Ink);
-    text(sy, 14, 40, f.subtitle, 1, Muted);
+    text(sy, 14, 40, f.subtitle, 1,
+         std::strstr(f.subtitle, "SOL") ? Gold : Muted);
     rect(sy, 12, 58, 296, 1, Rule);
     rect(sy, 12, 58, 46, 2, f.accent);
     for (int i = 0; i < 6; i++) {
       int y = 70 + i * 21;
       bool selected = f.selected == i;
       if (selected) {
-        rect(sy, 12, y - 3, 296, 20, f.accent);
-        rect(sy, 12, y - 3, 3, 20, Gold);
-        text(sy, 19, y, ">", 2, Paper);
+        rect(sy, 12, y - 3, 296, 20, Rule);
+        rect(sy, 12, y - 3, 3, 20, Cyan);
+        text(sy, 19, y, ">", 2, Cyan);
       }
       // Long informational rows stay within the screen instead of clipping.
       int scale = std::strlen(f.rows[i]) <= 23 ? 2 : 1;
       text(sy, 32, y + (scale == 1 ? 3 : 0), f.rows[i], scale,
-           selected ? Paper : Ink);
+           std::strstr(f.rows[i], "SOL") ? Gold : Ink);
     }
     rect(sy, 12, 197, 296, 1, Rule);
     text(sy, 14, 205, f.status, 1, f.accent);

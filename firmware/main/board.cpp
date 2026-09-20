@@ -21,7 +21,7 @@ namespace board {
 static esp_lcd_panel_handle_t panel;
 static SemaphoreHandle_t lcdDone;
 static uint16_t *stripe;
-static constexpr int StripeH = 16;
+static constexpr int StripeH = display::StripeH;
 static i2c_master_dev_handle_t accelerometer;
 static bool accelOk;
 static rmt_channel_handle_t ledChannel;
@@ -54,7 +54,7 @@ esp_err_t init() {
   if (!lcdDone)
     return ESP_ERR_NO_MEM;
   stripe = static_cast<uint16_t *>(heap_caps_malloc(
-      320 * StripeH * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+      2 * 320 * StripeH * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
   if (!stripe)
     return ESP_ERR_NO_MEM;
   spi_bus_config_t spi{};
@@ -213,13 +213,35 @@ void leds(uint8_t red, uint8_t green, uint8_t blue, int active) {
   reported = result != ESP_OK;
 }
 void render(const Screen &f) {
-  display::Painter painter{stripe};
+  static uint32_t hashes[30]{};
+  static bool initialized = false;
+  static display::Damage damage;
+  uint32_t dirty = damage.update(f);
+  bool inFlight = false;
+  unsigned buffer = 0;
   for (int sy = 0; sy < 240; sy += StripeH) {
+    if (initialized && !(dirty & (1u << (sy / StripeH))))
+      continue;
+    auto *pixels = stripe + buffer * 320 * StripeH;
+    display::Painter painter{pixels};
     painter.paint(f, sy);
-    ESP_ERROR_CHECK(
-        esp_lcd_panel_draw_bitmap(panel, 0, sy, 320, sy + StripeH, stripe));
-    if (xSemaphoreTake(lcdDone, pdMS_TO_TICKS(100)) != pdTRUE)
+    uint32_t hash = 2166136261u;
+    for (int i = 0; i < 320 * StripeH; i++)
+      hash = (hash ^ pixels[i]) * 16777619u;
+    if (initialized && hashes[sy / StripeH] == hash)
+      continue;
+    // Render into the free half while the preceding half is on the SPI bus.
+    if (inFlight && xSemaphoreTake(lcdDone, pdMS_TO_TICKS(100)) != pdTRUE)
       ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
+    hashes[sy / StripeH] = hash;
+    ESP_ERROR_CHECK(
+        esp_lcd_panel_draw_bitmap(panel, 0, sy, 320, sy + StripeH, pixels));
+    inFlight = true;
+    buffer ^= 1;
   }
+  if (inFlight && xSemaphoreTake(lcdDone, pdMS_TO_TICKS(100)) != pdTRUE)
+    ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
+  initialized = true;
 }
+
 } // namespace board

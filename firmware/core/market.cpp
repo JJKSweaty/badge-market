@@ -8,7 +8,7 @@ const char *error_text(Error e) {
       "SYNC REQUIRED",        "NOT ENOUGH SOL",    "INVALID AMOUNT",
       "4 HOLDINGS MAX",       "NOT ENOUGH TOKENS", "COIN CLOSED",
       "CREATOR ONLY",         "RUG COOLDOWN",      "ONE ACTIVE COIN",
-      "SYMBOL TAKEN/INVALID", "WAIT 20 SECONDS",   "INVALID GAME PROOF",
+      "SYMBOL TAKEN/INVALID", "GAME BUSY - RETRY", "INVALID GAME PROOF",
       "EPOCH REWARD CAP",     "SESSION EXHAUSTED"};
   auto i = unsigned(e);
   return i < 17 ? names[i] : "UNKNOWN ERROR";
@@ -34,13 +34,13 @@ uint8_t command(uint32_t s, unsigned r, unsigned &d) {
   return (s >> 16) % 3;
 }
 uint32_t request_hash(const Request &r) {
-  uint8_t b[26];
+  uint8_t b[202];
   Writer w{b, sizeof b};
   w.u8(uint8_t(r.op));
   w.u8(r.coin);
   w.u16(r.amount);
   w.bytes(r.symbol, 6);
-  w.bytes(r.proof, 16);
+  w.bytes(r.proof, sizeof r.proof);
   return crc32(b, w.pos);
 }
 static Holding *holding(Player &p, unsigned coin) {
@@ -179,7 +179,19 @@ Result Market::request(uint8_t pid, const Request &r, uint64_t now,
       fail(Error::Amount);
       break;
     }
+    uint32_t quote = uint32_t(r.proof[0]) | uint32_t(r.proof[1]) << 8 |
+                     uint32_t(r.proof[2]) << 16 | uint32_t(r.proof[3]) << 24;
+    uint32_t total = buy ? gross + fee : gross - fee;
+    if (quote && (buy ? total > quote : total < quote)) {
+      fail(Error::Sequence);
+      break;
+    }
+    result.value = total;
+    result.amount = n;
     if (buy) {
+      if (!q)
+        h->basisKnown = true;
+      h->basis += total;
       a.balance -= gross + fee;
       coin->reserve += gross;
       coin->supply += n;
@@ -197,6 +209,7 @@ Result Market::request(uint8_t pid, const Request &r, uint64_t now,
       a.balance += gross - fee;
       coin->reserve -= gross;
       coin->supply -= n;
+      h->basis -= uint64_t(h->basis) * n / q;
       h->quantity = q - n;
       h->eligible = std::min(h->eligible, h->quantity);
       h->since = epoch;
@@ -230,7 +243,9 @@ Result Market::request(uint8_t pid, const Request &r, uint64_t now,
       break;
     }
     a.balance += amount;
+    result.value = amount;
     if (percent == 100) {
+      coin->rugLoot = amount;
       coin->creatorFees = coin->communityFees = 0;
       coin->rugged = true;
       coin->meme = 0;
@@ -242,44 +257,148 @@ Result Market::request(uint8_t pid, const Request &r, uint64_t now,
     result.coin = r.coin;
     break;
   }
-  case Op::Ticket:
-    if (a.gameAt && now - a.gameAt < 20000) {
+  case Op::Ticket: {
+    if (r.coin != 1 && r.coin != 2) {
+      fail(Error::Amount);
+      break;
+    }
+    if (a.ticket && now >= a.gameAt && now - a.gameAt < 600000) {
       fail(Error::Wait);
       break;
     }
-    if (a.budget >= 6000) {
-      fail(Error::Budget);
-      break;
+    a.game = Game(r.coin);
+    a.ticketEpoch = epoch;
+    a.gameAt = now;
+    a.factor = r.coin == 2 ? (a.runCount == 0   ? 100
+                              : a.runCount == 1 ? 50
+                              : a.runCount == 2 ? 25
+                                                : 0)
+                           : 100;
+    uint32_t cap = r.coin == 1
+                       ? 10000
+                       : std::min(6000u - a.runBudget, 5000u * a.factor / 100);
+    if (r.coin == 1 && a.puzzleDone >= (epoch / 2 + 1))
+      cap = 0;
+    a.allowance = std::min<uint32_t>(20000u - a.budget, cap);
+    a.budget += a.allowance;
+    if (r.coin == 2) {
+      a.runBudget += a.allowance;
+      if (a.runCount < 65535)
+        ++a.runCount;
     }
-    a.ticket = entropy ? entropy : 1;
-    a.gameAt = now ? now : 1;
+    a.ticket = r.coin == 1 ? (id ^ (uint32_t(epoch / 2 + 1) * 2654435761u))
+                           : (entropy ? entropy : 1);
+    if (!a.ticket)
+      a.ticket = 1;
     result.ticket = a.ticket;
+    result.value = a.allowance;
     break;
-  case Op::Claim: {
-    uint64_t elapsed = now >= a.gameAt ? now - a.gameAt : 0;
-    unsigned score = 0, total = 0;
-    if (!a.ticket || elapsed < 4000 || elapsed > 45000)
-      fail(Error::Proof);
-    for (unsigned i = 0; i < 8; i++) {
-      unsigned delay;
-      auto key = command(a.ticket, i + 1, delay);
-      unsigned dt = r.proof[i + 8] * 20;
-      auto pressed = r.proof[i];
-      if (pressed > 3 || dt < 100 || dt > 2400)
-        fail(Error::Proof);
-      if (pressed == key && dt >= 100 && dt <= 1800)
-        score += 250;
-      total += delay + dt;
-    }
-    if (total > elapsed + 1000)
-      fail(Error::Proof);
-    if (result.code == Error::Ok) {
-      uint32_t reward =
-          std::min<uint32_t>({score, 6000u - a.budget, WalletCap - a.balance});
-      a.balance += reward;
-      a.budget += reward;
+  }
+  case Op::CancelGame:
+    if (a.ticket && a.ticketEpoch == epoch) {
+      a.budget -= a.allowance;
+      if (a.game == Game::Run)
+        a.runBudget -= a.allowance;
     }
     a.ticket = 0;
+    a.allowance = 0;
+    a.game = Game::None;
+    if (proofOwner == pid) {
+      proofOwner = -1;
+      proofSize = 0;
+    }
+    break;
+  case Op::RunChunk: {
+    unsigned len = uint8_t(r.symbol[0]) | unsigned(uint8_t(r.symbol[1])) << 8;
+    if (!a.ticket || a.game != Game::Run || len > 180 || !len || len % 3 ||
+        r.amount + len > sizeof runProof) {
+      fail(Error::Proof);
+      break;
+    }
+    if (!r.amount) {
+      if (proofOwner >= 0 && proofOwner != pid && now < proofAt + 15000) {
+        fail(Error::Wait);
+        break;
+      }
+      proofOwner = pid;
+      proofTicket = a.ticket;
+      proofSize = 0;
+    }
+    if (proofOwner != pid || proofTicket != a.ticket || r.amount != proofSize) {
+      fail(Error::Wait);
+      break;
+    }
+    std::memcpy(runProof + proofSize, r.proof, len);
+    proofSize += len;
+    proofAt = now;
+    break;
+  }
+  case Op::Claim: {
+    uint32_t raw = 0;
+    if (!a.ticket || uint8_t(a.game) != r.coin || now < a.gameAt ||
+        now - a.gameAt > 600000) {
+      fail(Error::Proof);
+      break;
+    }
+    if (a.game == Game::Word) {
+      if (!r.amount || r.amount > 6) {
+        fail(Error::Proof);
+        break;
+      }
+      char answer[6];
+      answer_word(a.ticket, answer);
+      bool solved = false;
+      for (unsigned i = 0; i < r.amount; i++) {
+        char guess[6]{};
+        std::memcpy(guess, r.proof + i * 5, 5);
+        if (!valid_word(guess) || solved) {
+          fail(Error::Proof);
+          break;
+        }
+        solved = std::memcmp(answer, guess, 5) == 0;
+      }
+      if ((!solved && r.amount != 6) || result.code != Error::Ok) {
+        fail(Error::Proof);
+        break;
+      }
+      static constexpr uint16_t rewards[] = {10000, 8000, 6500,
+                                             5000,  3500, 2000};
+      raw = solved ? rewards[r.amount - 1] : 750;
+      a.puzzleDone = std::max(a.puzzleDone, uint16_t(a.ticketEpoch / 2 + 1));
+      if (solved && (!a.wordBest || r.amount < a.wordBest))
+        a.wordBest = r.amount;
+    } else if (a.game == Game::Run) {
+      Reader proof{r.proof, sizeof r.proof};
+      auto score = proof.u32();
+      auto len = proof.u16();
+      if (len > sizeof runProof ||
+          (len && (proofOwner != pid || proofTicket != a.ticket ||
+                   len != proofSize)) ||
+          now - a.gameAt < uint64_t(r.amount) * 20 ||
+          !Runner::verify(a.ticket, runProof, len, r.amount, score)) {
+        fail(Error::Proof);
+        break;
+      }
+      raw = std::min<uint32_t>(5000u, 200 + score * 5 / 2) * a.factor / 100;
+      a.runBest = std::max(a.runBest, score);
+      proofOwner = -1;
+      proofSize = 0;
+    } else {
+      fail(Error::Proof);
+      break;
+    }
+    uint32_t reward =
+        std::min({raw, uint32_t(a.allowance), WalletCap - a.balance});
+    if (a.ticketEpoch == epoch) {
+      a.budget -= a.allowance - reward;
+      if (a.game == Game::Run)
+        a.runBudget -= a.allowance - reward;
+    }
+    a.balance += reward;
+    result.value = reward;
+    a.ticket = 0;
+    a.allowance = 0;
+    a.game = Game::None;
     break;
   }
   default:
@@ -330,8 +449,7 @@ void Market::advance_epoch() {
   }
   for (unsigned i = 0; i < players; i++) {
     p[i].budget = 0;
-    p[i].ticket = 0;
-    p[i].gameAt = 0;
+    p[i].runBudget = p[i].bombBudget = p[i].runCount = 0;
   }
   dirty = true;
   revision++;
@@ -342,9 +460,10 @@ bool Market::valid() const {
     return false;
   for (unsigned i = 0; i < players; i++) {
     auto &a = p[i];
-    if (a.balance > WalletCap || !a.next || a.rep > 100 || a.budget > 6000 ||
-        unsigned(a.last.code) > 16 || a.last.coin > coins ||
-        a.lastSeq >= a.next)
+    if (a.balance > WalletCap || !a.next || a.rep > 100 || a.budget > 20000 ||
+        a.runBudget > 6000 || a.bombBudget > 5000 || a.allowance > 10000 ||
+        unsigned(a.game) > 3 || a.wordBest > 6 || unsigned(a.last.code) > 16 ||
+        a.last.coin > coins || a.lastSeq >= a.next)
       return false;
     for (unsigned k = 0; k < i; k++)
       if (p[k].mac == a.mac)
@@ -352,7 +471,8 @@ bool Market::valid() const {
     for (unsigned j = 0; j < MaxHoldings; j++) {
       auto &h = a.holdings[j];
       if (h.coin > coins || h.quantity > 10000 || h.eligible > h.quantity ||
-          h.since > epoch || (!h.coin && h.quantity) || (h.coin && !h.quantity))
+          h.since > epoch || h.basis > WalletCap || (!h.coin && h.quantity) ||
+          (h.coin && !h.quantity))
         return false;
       for (unsigned k = 0; k < j; k++)
         if (h.coin && a.holdings[k].coin == h.coin)
@@ -362,7 +482,8 @@ bool Market::valid() const {
   for (unsigned j = 0; j < coins; j++) {
     auto &coin = c[j];
     if (!symbol_ok(coin.symbol) || coin.creator >= players ||
-        coin.supply > 10000 || coin.meme > 1000 || coin.created > epoch ||
+        coin.supply > 10000 || coin.rugLoot > WalletCap || coin.meme > 1000 ||
+        coin.created > epoch ||
         coin.reserve != (coin.supply ? cost(0, coin.supply) : 0) ||
         uint64_t(coin.creatorFees) + coin.communityFees > WalletCap)
       return false;
@@ -377,14 +498,29 @@ bool Market::valid() const {
   }
   return true;
 }
+uint32_t Market::bomb_reward(unsigned pid, uint32_t round, uint32_t nominal) {
+  if (pid >= players || !round || p[pid].bombRound >= round)
+    return 0;
+  auto &a = p[pid];
+  a.bombRound = round;
+  auto reward = std::min<uint32_t>({nominal, 5000u - a.bombBudget,
+                                    20000u - a.budget, WalletCap - a.balance});
+  a.budget += reward;
+  a.bombBudget += reward;
+  a.balance += reward;
+  dirty = true;
+  ++revision;
+  return reward;
+}
 size_t encode(const Market &m, uint8_t *b, size_t cap) {
   Writer w{b, cap};
-  w.u32(0x324d424e);
+  w.u32(0x334d424e);
   w.u32(m.id);
   w.u32(m.revision);
   w.u16(m.epoch);
   w.u8(m.players);
   w.u8(m.coins);
+  w.u32(m.bombSerial);
   for (unsigned i = 0; i < m.players; i++) {
     auto &p = m.p[i];
     w.bytes(p.mac.b, 6);
@@ -400,11 +536,26 @@ size_t encode(const Market &m, uint8_t *b, size_t cap) {
     w.u8(p.last.coin);
     w.u32(p.last.ticket);
     w.u32(p.ticket);
+    w.u32(p.last.value);
+    w.u16(p.last.amount);
+    w.u8(uint8_t(p.game));
+    w.u16(p.ticketEpoch);
+    w.u16(p.allowance);
+    w.u16(p.runBudget);
+    w.u16(p.bombBudget);
+    w.u16(p.puzzleDone);
+    w.u16(p.runCount);
+    w.u8(p.factor);
+    w.u8(p.wordBest);
+    w.u32(p.runBest);
+    w.u32(p.bombRound);
     for (auto &h : p.holdings) {
       w.u8(h.coin);
       w.u16(h.quantity);
       w.u16(h.eligible);
       w.u16(h.since);
+      w.u32(h.basis);
+      w.u8(h.basisKnown);
     }
   }
   for (unsigned i = 0; i < m.coins; i++) {
@@ -419,6 +570,7 @@ size_t encode(const Market &m, uint8_t *b, size_t cap) {
     w.u32(c.reserve);
     w.u32(c.creatorFees);
     w.u32(c.communityFees);
+    w.u32(c.rugLoot);
   }
   auto crc = crc32(b, w.pos);
   w.u32(crc);
@@ -431,7 +583,9 @@ bool decode(Market &out, const uint8_t *b, size_t n, bool restore) {
   if (crc32(b, n - 4) != tail.u32())
     return false;
   Reader r{b, n - 4};
-  if (r.u32() != 0x324d424e)
+  auto magic = r.u32();
+  bool legacy = magic == 0x324d424e;
+  if (!legacy && magic != 0x334d424e)
     return false;
   Market m{};
   m.id = r.u32();
@@ -439,6 +593,8 @@ bool decode(Market &out, const uint8_t *b, size_t n, bool restore) {
   m.epoch = r.u16();
   m.players = r.u8();
   m.coins = r.u8();
+  if (!legacy)
+    m.bombSerial = r.u32();
   if (m.players > MaxPlayers || m.coins > MaxCoins)
     return false;
   for (unsigned i = 0; i < m.players; i++) {
@@ -456,13 +612,38 @@ bool decode(Market &out, const uint8_t *b, size_t n, bool restore) {
     p.last.coin = r.u8();
     p.last.ticket = r.u32();
     p.ticket = r.u32();
+    if (!legacy) {
+      p.last.value = r.u32();
+      p.last.amount = r.u16();
+      p.game = Game(r.u8());
+      p.ticketEpoch = r.u16();
+      p.allowance = r.u16();
+      p.runBudget = r.u16();
+      p.bombBudget = r.u16();
+      p.puzzleDone = r.u16();
+      p.runCount = r.u16();
+      p.factor = r.u8();
+      p.wordBest = r.u8();
+      p.runBest = r.u32();
+      p.bombRound = r.u32();
+    }
     for (auto &h : p.holdings) {
       h.coin = r.u8();
       h.quantity = r.u16();
       h.eligible = r.u16();
       h.since = r.u16();
+      if (!legacy) {
+        h.basis = r.u32();
+        auto known = r.u8();
+        if (known > 1)
+          return false;
+        h.basisKnown = known;
+      } else
+        h.basisKnown = !h.coin;
     }
-    if (restore) {
+    if (restore || legacy) {
+      p.game = Game::None;
+      p.allowance = 0;
       p.ticket = 0;
       p.last.ticket = 0;
     }
@@ -482,6 +663,8 @@ bool decode(Market &out, const uint8_t *b, size_t n, bool restore) {
     c.reserve = r.u32();
     c.creatorFees = r.u32();
     c.communityFees = r.u32();
+    if (!legacy)
+      c.rugLoot = r.u32();
   }
   if (!r.ok || r.pos != n - 4 || !m.valid())
     return false;

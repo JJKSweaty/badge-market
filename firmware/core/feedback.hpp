@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 namespace bm {
 enum class Glow {
@@ -11,6 +12,7 @@ enum class Glow {
   Error,
   Rug,
   Win,
+  WordSolved,
   Save
 };
 struct Light {
@@ -29,8 +31,8 @@ public:
     effect = kind;
     at = now;
     until = now + (kind == Glow::Navigate ? 120
-                   : kind == Glow::Rug    ? 2400
-                   : kind == Glow::Win    ? 1800
+                   : kind == Glow::Rug    ? 1000
+                   : kind == Glow::Win    ? 1200
                                           : 800);
   }
   Light sample(uint64_t now) const {
@@ -41,18 +43,26 @@ public:
     case Glow::Navigate:
       return {2, 5, 7, int((now / 120) % 6)};
     case Glow::Buy:
-      return {0, 12, 2, -1};
-    case Glow::Sell:
-      return {0, 5, 12, -1};
+      return elapsed < 350 ? Light{0, 12, 2, -1} : Light{0, 9, 12, -1};
+    case Glow::Sell: {
+      static constexpr int outward[] = {2, 3, 1, 4, 0, 5};
+      return {12, 1, 2, outward[std::min(5u, elapsed / 100)]};
+    }
+    case Glow::WordSolved:
+      return elapsed < 400 ? Light{0, 12, 3, -1}
+                           : Light{12, 8, 0, int(elapsed / 100 % 6)};
     case Glow::Launch:
       return {9, 2, 12, int(elapsed / 100 % 6)};
     case Glow::Reward:
-    case Glow::Win:
       return {12, 8, 0, int(elapsed / 120 % 6)};
+    case Glow::Win:
+      return elapsed < 400   ? Light{12, 9, 0, -1}
+             : elapsed < 800 ? Light{0, 10, 12, -1}
+                             : Light{0, 12, 3, -1};
     case Glow::Error:
       return {12, 0, 0, -1};
     case Glow::Rug:
-      return {uint8_t(elapsed % 900 < 450 ? 12 : 2), 0, 0, -1};
+      return {uint8_t(elapsed % 160 < 80 ? 12 : 0), 0, 0, -1};
     case Glow::Save:
       return {0, 8, 7, -1};
     default:

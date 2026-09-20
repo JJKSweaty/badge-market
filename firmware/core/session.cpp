@@ -17,7 +17,7 @@ bool Session::frame(uint8_t kind, Mac to, uint32_t serial, const uint8_t *data,
   Writer w{b, sizeof b};
   w.u32(0x324d424e);
   w.u8(kind);
-  w.u8(1);
+  w.u8(2);
   w.u32(market_);
   w.u32(serial);
   w.bytes(to.b, 6);
@@ -43,7 +43,7 @@ void Session::start(bool hosting, uint64_t now, const Market *saved) {
   market_ = world.id;
   host = self;
   epochAt_ = now + 120000;
-  syncAt_ = now;
+  syncAt_ = 0;
   status = "MARKET OPEN";
   changed = true;
 }
@@ -104,6 +104,11 @@ void Session::queue_snapshot() {
   txOffset_ = 0;
   txRevision_ = world.revision;
 }
+bool Session::send_game(Mac to, uint8_t kind, uint32_t serial,
+                        const uint8_t *data, size_t n) {
+  return kind >= 40 && kind <= 53 && player >= 0 &&
+         frame(kind, to, serial, data, n);
+}
 bool Session::send_social(Mac target, uint8_t kind, uint32_t nonce,
                           uint32_t value) {
   if (kind < 20 || kind > 26 || player < 0)
@@ -125,7 +130,11 @@ void Session::tick(uint64_t now) {
       beaconAt_ = now + 1700 + entropy(context) % 500;
     }
     if (!txSize_ && now >= syncAt_) {
-      queue_snapshot();
+      // No full-state broadcasts for an unchanged, unattended host. Guests
+      // still request snapshots periodically; join/retry sets syncAt_ to zero
+      // and forces a resend even when the revision has not changed.
+      if (!syncAt_ || txRevision_ != world.revision)
+        queue_snapshot();
       syncAt_ = now + 2500;
     }
     if (txSize_ && now >= txAt_) {
@@ -144,13 +153,13 @@ void Session::tick(uint64_t now) {
     }
   } else if (mode == Mode::Client) {
     if (pending && now >= retryAt_) {
-      uint8_t b[26];
+      uint8_t b[202];
       Writer w{b, sizeof b};
       w.u8(uint8_t(request_.op));
       w.u8(request_.coin);
       w.u16(request_.amount);
       w.bytes(request_.symbol, 6);
-      w.bytes(request_.proof, 16);
+      w.bytes(request_.proof, sizeof request_.proof);
       frame(2, host, request_.seq, b, w.pos);
       retryAt_ = now + 850 + entropy(context) % 250;
     }
@@ -181,7 +190,7 @@ void Session::receive(Mac from, int8_t rssi, const uint8_t *b, size_t n,
   if (r.u32() != 0x324d424e)
     return;
   uint8_t kind = r.u8();
-  if (r.u8() != 1)
+  if (r.u8() != 2)
     return;
   uint32_t market = r.u32(), serial = r.u32();
   Mac target;
@@ -210,6 +219,10 @@ void Session::receive(Mac from, int8_t rssi, const uint8_t *b, size_t n,
   }
   if (market != market_)
     return;
+  if (kind >= 40 && kind <= 53 && player >= 0 && gameReceive) {
+    gameReceive(gameContext, from, kind, serial, b + r.pos, payload, now);
+    return;
+  }
   if (kind >= 20 && kind <= 26 && payload == 4 && player >= 0 &&
       world.find(from) >= 0) {
     auto value = r.u32();
@@ -226,7 +239,7 @@ void Session::receive(Mac from, int8_t rssi, const uint8_t *b, size_t n,
       } else
         syncAt_ = 0;
       changed = true;
-    } else if (kind == 2 && payload == 26) {
+    } else if (kind == 2 && payload == 202) {
       int p = world.find(from);
       if (p < 0)
         return;
@@ -236,7 +249,7 @@ void Session::receive(Mac from, int8_t rssi, const uint8_t *b, size_t n,
       q.coin = r.u8();
       q.amount = r.u16();
       r.bytes(q.symbol, 6);
-      r.bytes(q.proof, 16);
+      r.bytes(q.proof, sizeof q.proof);
       auto result = world.request(p, q, now, entropy(context));
       uint8_t ack[6];
       Writer w{ack, 6};

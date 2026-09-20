@@ -1,5 +1,5 @@
-#include "games.hpp"
 #include "market.hpp"
+#include "play.hpp"
 #include "session.hpp"
 #include <algorithm>
 #include <cassert>
@@ -37,7 +37,7 @@ struct Node {
   Session s;
   int id;
   uint32_t rng = 71;
-  Duel duel;
+
   Node(int n) : id(n) {
     s.init(
         mac(n),
@@ -52,10 +52,26 @@ struct Node {
           return node->rng;
         },
         this);
-    duel.init(s);
   }
 };
 int main() {
+  {
+    Node quiet(9);
+    quiet.s.start(true, 1);
+    for (unsigned t = 1; t < 1000; t += 20)
+      quiet.s.tick(t);
+    bool initialSnapshot = false;
+    for (auto &message : messages)
+      initialSnapshot |= message.bytes[4] == 3;
+    assert(initialSnapshot);
+    messages.clear();
+    for (unsigned t = 1001; t < 30000; t += 20)
+      quiet.s.tick(t);
+    assert(!messages.empty()); // Discovery beacons must remain active.
+    for (auto &message : messages)
+      assert(message.bytes[4] == 0); // No repeated unchanged snapshots.
+    messages.clear();
+  }
   Market m;
   m.reset(123);
   assert(m.join(mac(1)) == 0);
@@ -156,6 +172,58 @@ int main() {
   assert(act(capacity, 5, Op::Create, 0, 0, "LIMIT").code == Error::Full);
   n = encode(capacity, data, sizeof data);
   assert(n && decode(restored, data, n));
+  // Recreate the exact v0.2.4 schema, including the four packed holdings.
+  uint8_t legacy[MaxSave];
+  Writer legacyWriter{legacy, sizeof legacy};
+  legacyWriter.u32(0x324d424e);
+  legacyWriter.u32(capacity.id);
+  legacyWriter.u32(capacity.revision);
+  legacyWriter.u16(capacity.epoch);
+  legacyWriter.u8(capacity.players);
+  legacyWriter.u8(capacity.coins);
+  for (unsigned i = 0; i < capacity.players; i++) {
+    auto &p = capacity.p[i];
+    legacyWriter.bytes(p.mac.b, 6);
+    legacyWriter.u32(p.balance);
+    legacyWriter.u32(p.next);
+    legacyWriter.u32(p.lastSeq);
+    legacyWriter.u32(p.lastHash);
+    legacyWriter.u8(p.rep);
+    legacyWriter.u16(p.rugs);
+    legacyWriter.u16(p.cooldown);
+    legacyWriter.u16(p.budget);
+    legacyWriter.u8(uint8_t(p.last.code));
+    legacyWriter.u8(p.last.coin);
+    legacyWriter.u32(p.last.ticket);
+    legacyWriter.u32(p.ticket);
+    for (auto &h : p.holdings) {
+      legacyWriter.u8(h.coin);
+      legacyWriter.u16(h.quantity);
+      legacyWriter.u16(h.eligible);
+      legacyWriter.u16(h.since);
+    }
+  }
+  for (unsigned i = 0; i < capacity.coins; i++) {
+    auto &c = capacity.c[i];
+    legacyWriter.bytes(c.symbol, 6);
+    legacyWriter.u8(c.creator);
+    legacyWriter.u8(c.rugged);
+    legacyWriter.u16(c.supply);
+    legacyWriter.u16(c.meme);
+    legacyWriter.u16(c.seen);
+    legacyWriter.u16(c.created);
+    legacyWriter.u32(c.reserve);
+    legacyWriter.u32(c.creatorFees);
+    legacyWriter.u32(c.communityFees);
+  }
+  legacyWriter.u32(crc32(legacy, legacyWriter.pos));
+  assert(legacyWriter.ok && decode(restored, legacy, legacyWriter.pos, true));
+  assert(restored.coins == capacity.coins &&
+         restored.players == capacity.players);
+  for (unsigned i = 0; i < capacity.players; i++)
+    assert(restored.p[i].balance == capacity.p[i].balance &&
+           restored.p[i].ticket == 0);
+  assert(encode(restored, legacy, sizeof legacy) == n);
   // Exercise structurally malformed payloads with a correct CRC as well.
   for (int i = 0; i < 10000; i++) {
     encode(capacity, data, sizeof data);
@@ -168,27 +236,23 @@ int main() {
   Market reward;
   reward.reset(99);
   reward.join(mac(1));
-  auto ticket = act(reward, 0, Op::Ticket, 0, 0, "COIN", 1000);
-  assert(ticket.ticket);
-  assert(act(reward, 0, Op::Ticket, 0, 0, "COIN", 1001).code == Error::Wait);
+  auto ticket = act(reward, 0, Op::Ticket, 1, 0, "COIN", 1000);
+  assert(ticket.ticket && ticket.value == 10000);
+  assert(act(reward, 0, Op::Ticket, 1, 0, "COIN", 1001).code == Error::Wait);
   Request claim{};
   claim.seq = reward.p[0].next;
   claim.op = Op::Claim;
-  for (unsigned i = 0; i < 8; i++) {
-    unsigned delay;
-    claim.proof[i] = command(ticket.ticket, i + 1, delay);
-    claim.proof[i + 8] = 10;
-  }
+  claim.coin = 1;
+  claim.amount = 1;
+  char answer[6];
+  answer_word(ticket.ticket, answer);
+  std::memcpy(claim.proof, answer, 5);
   assert(reward.request(0, claim, 12000, 1).code == Error::Ok);
-  assert(reward.p[0].balance == 27000);
+  assert(reward.p[0].balance == 35000);
   assert(reward.request(0, claim, 12000, 1).code == Error::Ok &&
-         reward.p[0].balance == 27000);
-  Reaction game;
-  game.start(123, 0);
-  game.tick(800);
-  assert(game.phase == Reaction::Wait);
-  game.press(game.key, 900);
-  assert(game.score == 0 && game.proof[0] == 3);
+         reward.p[0].balance == 35000);
+  auto replay = act(reward, 0, Op::Ticket, 1, 0, "COIN", 13000);
+  assert(replay.ticket == ticket.ticket && replay.value == 0);
   Node host(1), client(2);
   host.s.start(true, 0);
   uint64_t clock = 0;
@@ -198,8 +262,7 @@ int main() {
       clock += 20;
       host.s.tick(clock);
       client.s.tick(clock);
-      host.duel.tick(clock);
-      client.duel.tick(clock);
+
       auto queue = std::move(messages);
       messages.clear();
       if (loss && random() % 2)
@@ -252,21 +315,6 @@ int main() {
   assert(client.s.pending && client.s.world.p[1].balance == original);
   step(16000, true);
   assert(!client.s.pending && owned(host.s.world.p[1], 1) == 14);
-  client.duel.challenge(mac(1), 919, clock);
-  step(2000, true);
-  assert(host.duel.phase == Duel::Invite);
-  host.duel.press(true, clock);
-  step(600, true);
-  step(4000, true);
-  if (client.duel.phase == Duel::Go)
-    client.duel.press(true, clock);
-  if (host.duel.phase == Duel::Go)
-    host.duel.press(true, clock);
-  step(5000, true);
-  assert(client.duel.phase == Duel::Done && host.duel.phase == Duel::Done);
-  auto phase = host.duel.phase;
-  host.duel.receive(mac(2), 20, client.duel.nonce, client.duel.seed, clock);
-  assert(host.duel.phase == phase);
   auto revision = host.s.world.revision;
   for (int i = 0; i < 10000; i++) {
     uint8_t junk[PacketMax];
@@ -276,6 +324,12 @@ int main() {
     host.s.receive(mac(77), -40, junk, size, clock);
   }
   assert(host.s.world.revision == revision);
+  // A connected guest must still refresh an unchanged market. This exercises
+  // periodic resync requests after suppressing unsolicited idle snapshots.
+  auto lastRefresh = client.s.lastSeen;
+  step(5000, false);
+  assert(host.s.world.revision == revision && client.s.lastSeen > lastRefresh);
+  assert(client.s.world.p[1].balance == host.s.world.p[1].balance);
   Node retry(3);
   retry.s.peers[0] = {mac(1), 99, clock, -40};
   retry.s.peerCount = 1;
@@ -284,7 +338,7 @@ int main() {
   assert(retry.s.mode == Mode::Menu);
   printf(
       "PASS: 30,000 conserved trades, snapshots, 20,000 malformed save inputs, "
-      "reaction proof, lossy two-badge trades, host outage, duel. Dropped=%d "
+      "word proof, lossy two-badge trades, host outage. Dropped=%d "
       "duplicated=%d. Market=%zu Session=%zu max save=%zu bytes\n",
       dropped, duplicated, sizeof(Market), sizeof(Session), n);
 }

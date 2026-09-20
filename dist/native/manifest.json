@@ -1,6 +1,6 @@
 {
   "name": "Badge Market native",
-  "version": "0.2.4",
+  "version": "0.3.1",
   "chip": "esp32c3",
   "idf": "5.5.3",
   "flash_settings": {
@@ -13,13 +13,13 @@
       "offset": "0x0",
       "file": "bootloader.bin",
       "bytes": 21024,
-      "sha256": "28bf89482f4c9892e03a1848256ddb6515f9ea01f0422dbeb21193a8d89dcbf3"
+      "sha256": "e81a2b1e1be387d2d32fcd00920d9df26c57af5911768c0ad61deaf3eacd4277"
     },
     {
       "offset": "0x10000",
       "file": "badge_market.bin",
-      "bytes": 771600,
-      "sha256": "25ea215df7b6eaa3300814106826526a054aac019e706a239b2410400dca21b5"
+      "bytes": 811040,
+      "sha256": "7d31e6826068bfae78661fa984a1cb2ef9d80ddf844f512f3f4999b9829105ee"
     },
     {
       "offset": "0x8000",

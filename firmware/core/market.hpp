@@ -1,4 +1,5 @@
 #pragma once
+#include "play.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -11,7 +12,16 @@ struct Mac {
   bool operator==(const Mac &o) const { return !std::memcmp(b, o.b, 6); }
   bool operator!=(const Mac &o) const { return !(*this == o); }
 };
-enum class Op : uint8_t { Create = 1, Buy, Sell, Withdraw, Ticket, Claim };
+enum class Op : uint8_t {
+  Create = 1,
+  Buy,
+  Sell,
+  Withdraw,
+  Ticket,
+  Claim,
+  RunChunk,
+  CancelGame
+};
 enum class Error : uint8_t {
   Ok,
   Full,
@@ -38,16 +48,19 @@ struct Request {
   uint8_t coin{};
   uint16_t amount{};
   char symbol[6]{};
-  uint8_t proof[16]{};
+  uint8_t proof[192]{};
 };
 struct Result {
   Error code{};
   uint8_t coin{};
-  uint32_t ticket{};
+  uint32_t ticket{}, value{};
+  uint16_t amount{};
 };
 struct Holding {
   uint8_t coin{};
   uint16_t quantity{}, eligible{}, since{};
+  uint32_t basis{};
+  bool basisKnown = true;
 };
 struct Player {
   Mac mac{};
@@ -55,6 +68,11 @@ struct Player {
   uint64_t gameAt{};
   uint16_t cooldown{}, budget{}, rugs{};
   uint8_t rep = 75;
+  Game game = Game::None;
+  uint16_t ticketEpoch{}, allowance{}, runBudget{}, bombBudget{}, puzzleDone{};
+  uint16_t runCount{};
+  uint8_t factor = 100, wordBest{};
+  uint32_t runBest{}, bombRound{};
   Result last{};
   Holding holdings[MaxHoldings]{};
 };
@@ -63,7 +81,7 @@ struct Coin {
   uint8_t creator{};
   bool rugged{};
   uint16_t supply{}, meme{}, seen{}, created{};
-  uint32_t reserve{}, creatorFees{}, communityFees{};
+  uint32_t reserve{}, creatorFees{}, communityFees{}, rugLoot{};
 };
 struct Market {
   uint32_t id{}, revision = 1;
@@ -72,12 +90,19 @@ struct Market {
   bool dirty{};
   Player p[MaxPlayers]{};
   Coin c[MaxCoins]{};
+  uint8_t runProof[Runner::MaxTrace * 3]{};
+  uint16_t proofSize{};
+  int8_t proofOwner = -1;
+  uint32_t proofTicket{};
+  uint64_t proofAt{};
+  uint32_t bombSerial{};
   void reset(uint32_t seed);
   int join(Mac);
   int find(Mac) const;
   Result request(uint8_t player, const Request &, uint64_t now,
                  uint32_t entropy);
   void advance_epoch();
+  uint32_t bomb_reward(unsigned player, uint32_t round, uint32_t nominal);
   bool valid() const;
 };
 uint32_t crc32(const uint8_t *, size_t);
