@@ -1,8 +1,7 @@
 # Badge Market
 
-Recording a submission? Use the [three-minute demo shot list](DEMO-PLAN.md).
-
-**Playing with a friend? Start with the [Market guide](MARKET-README.md)** for
+R
+**Playing with a friend? Start with the ** for
 hosting, joining, creating coins, trading, saving, and leaving a market.
 
 **Native ESP-IDF firmware is now in [`firmware/`](firmware/README.md).** Open that
